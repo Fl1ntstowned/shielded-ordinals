@@ -3,7 +3,7 @@
 Every Shielded Ordinals indexer answers the same read API. You can call:
 
 - **your own indexer**, at `http://127.0.0.1:5021` after following [RUN-AN-INDEXER.md](RUN-AN-INDEXER.md). No key, no limit.
-- **the hosted API run by Ord Dropz**, at `https://API_HOST`, with an API key from Ord Dropz.
+- **the hosted API run by Ord Dropz**, at `https://API_HOST`, with an API key from Ord Dropz. Every call needs the key except `/status` and `/health`.
 
 Both give the same answers at the same block. Everything served is public data read from Bitcoin. Nothing in this API can move a piece or reveal who holds one.
 
@@ -27,20 +27,37 @@ curl -H "x-api-key: shord_…" https://API_HOST/status
 
 ### Limits
 
+Calls are counted in units. Most routes cost 1 unit. `/state` costs 20, or 5 with `?since=`. An answer that has not changed since your last call (see "not modified" below) costs 1 whatever the route.
+
 | Caller | Allowance |
 |---|---|
-| With a key | The key's own limit, 600 requests a minute unless Ord Dropz set another |
-| Without a key | 30 requests a minute, shared by everyone at the same network address |
+| With a key | 60 units a minute and 5,000 units a day, unless Ord Dropz set other limits for your key |
+| Without a key | `/status` only: 30 units a minute, shared by everyone at the same network address |
 
 Every answer says where you stand:
 
 | Header | Meaning |
 |---|---|
-| `x-ratelimit-limit` | Requests allowed this minute |
-| `x-ratelimit-remaining` | Requests left this minute |
-| `retry-after` | On a refusal: seconds until the next minute starts |
+| `x-ratelimit-limit` | Units allowed this minute |
+| `x-ratelimit-remaining` | Units left this minute |
+| `x-ratelimit-daily-limit` | Units allowed today |
+| `x-ratelimit-daily-remaining` | Units left today |
+| `retry-after` | On a refusal: seconds until the minute, or the day, rolls over |
 
-The allowance resets at the start of each clock minute.
+The minute resets at the start of each clock minute; the day resets at midnight UTC. Need more? Ask Ord Dropz; limits are set per key.
+
+### Not modified: pay 1 unit for an unchanged answer
+
+Every answer carries an `etag`. Send it back as `If-None-Match` on your next call. If nothing changed (no new block), you get `304 Not Modified`, no body, and it costs 1 unit instead of the route's price.
+
+```
+curl -i -H "x-api-key: shord_…" https://API_HOST/state
+# ... etag: "970094-f24cd53beddf"
+curl -i -H "x-api-key: shord_…" -H 'If-None-Match: "970094-f24cd53beddf"' https://API_HOST/state
+# HTTP/1.1 304 Not Modified
+```
+
+Answers are compressed when you send `Accept-Encoding: gzip` (curl: `--compressed`). The state is several megabytes raw; compressed it is a fraction of that.
 
 ### Errors
 
@@ -49,14 +66,15 @@ The allowance resets at the start of each clock minute.
 | `401` | `{"error":"This API key is not valid."}` | The key is wrong, mistyped or revoked |
 | `401` | `{"error":"An API key is needed. …"}` | This API accepts no calls without a key |
 | `404` | `{"error":"not found"}` | No such route |
-| `429` | `{"error":"Too many requests …"}` | Over the limit. Wait `retry-after` seconds |
+| `429` | `{"error":"Too many requests …"}` | Over the minute's limit. Wait `retry-after` seconds |
+| `429` | `{"error":"This key has used its allowance for today. …"}` | Over the day's limit. Resets at midnight UTC |
 | `503` | `{"error":"still syncing"}` | The indexer is replaying blocks. Try again shortly |
 
 A wrong key is always refused. It is never treated as a call without a key.
 
 ## How to use it well
 
-Poll `/status`. It is small. Read `/state` or `/listings` again only when `lastHeight` changed, because the state only changes when a block lands.
+Poll `/status` (1 unit, no key needed). Read `/state` or `/listings` again only when `lastHeight` changed, because the state only changes when a block lands. Or always send `If-None-Match` and let the 304 tell you.
 
 `/state` is large (several megabytes for a traded collection). Fetch it once, remember `noteCount`, and afterwards ask for `/state?since=<noteCount>` to receive only the notes you don't have.
 
@@ -205,17 +223,18 @@ API_KEYS_FILE=/data/api-keys.json node indexer/indexer.mjs
 | Variable | Meaning | Default |
 |---|---|---|
 | `API_KEYS_FILE` | Where key hashes are kept. Setting it turns keys and limits on | off |
-| `API_KEY_REQUIRED` | `1` refuses every call without a key | `0` |
+| `API_KEY_REQUIRED` | `1` refuses every call without a key, except `/status` and `/health` | `0` |
 | `PUBLIC_LIMIT` | Requests a minute for callers without a key, per address | `30` |
 | `TRUST_PROXY` | How many proxies stand in front of the indexer. The caller's address is read that many steps back in `X-Forwarded-For`. Leave `0` when callers connect directly | `0` |
 | `ADMIN_SECRET` | A long secret that turns on key management over HTTP | off |
 
-Only the SHA-256 of each key is stored, so a copy of the keys file can't be used to call the API. Calls per key per day are counted in `usage.json` beside it.
+Only the SHA-256 of each key is stored, so a copy of the keys file can't be used to call the API. Units per key per day are counted in `usage.json` beside it, and the daily limit is enforced from that count. New keys get 60 units a minute and 5,000 a day unless you say otherwise.
 
 On the machine that holds the file:
 
 ```
-node indexer/keys.mjs create "who it is for" 600
+node indexer/keys.mjs create "who it is for" 60 5000      # per minute, per day
+node indexer/keys.mjs limits <id> 300 20000               # change a key's limits
 node indexer/keys.mjs list
 node indexer/keys.mjs revoke <id>
 ```
@@ -225,7 +244,8 @@ node indexer/keys.mjs revoke <id>
 Or over HTTP, when `ADMIN_SECRET` is set:
 
 ```
-curl -X POST https://API_HOST/admin/keys -H "x-admin-secret: …" -H "content-type: application/json" -d '{"label":"who it is for","limit":600}'
+curl -X POST https://API_HOST/admin/keys -H "x-admin-secret: …" -H "content-type: application/json" -d '{"label":"who it is for","limit":60,"daily":5000}'
+curl -X POST https://API_HOST/admin/keys/limits -H "x-admin-secret: …" -H "content-type: application/json" -d '{"id":"<id>","limit":300,"daily":20000}'
 curl https://API_HOST/admin/keys -H "x-admin-secret: …"
 curl -X POST https://API_HOST/admin/keys/revoke -H "x-admin-secret: …" -H "content-type: application/json" -d '{"id":"<id>"}'
 ```
@@ -235,7 +255,8 @@ The first answers with the new key. The second lists every key with its calls pe
 The same three commands work from your own machine against that indexer, so you never handle the HTTP calls yourself. Keep the admin secret in a file:
 
 ```
-node indexer/keys.mjs create "who it is for" 600 --at https://API_HOST --secret-file ~/.secrets/indexer-admin.txt
+node indexer/keys.mjs create "who it is for" 60 5000 --at https://API_HOST --secret-file ~/.secrets/indexer-admin.txt
+node indexer/keys.mjs limits <id> 300 20000 --at https://API_HOST --secret-file ~/.secrets/indexer-admin.txt
 node indexer/keys.mjs list --at https://API_HOST --secret-file ~/.secrets/indexer-admin.txt
 node indexer/keys.mjs revoke <id> --at https://API_HOST --secret-file ~/.secrets/indexer-admin.txt
 ```

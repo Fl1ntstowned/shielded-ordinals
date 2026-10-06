@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { makeGate, KeyStore, Limiter, hashKey, callerAddress } from '../indexer/keys.mjs';
+import { makeGate, KeyStore, Limiter, hashKey, callerAddress, DEFAULT_LIMIT, DEFAULT_DAILY } from '../indexer/keys.mjs';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shord-keys-'));
 const file = path.join(dir, 'api-keys.json');
@@ -14,7 +14,7 @@ const check = (label, ok) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`);
 const req = (headers = {}, addr = '10.0.0.1') => ({ headers, socket: { remoteAddress: addr } });
 
 const gate = makeGate({ keysFile: file, publicLimit: 3 });
-const made = gate.store.create('test developer', 5);
+const made = gate.store.create('test developer', 5, 12);
 
 check('a key has the documented shape', /^shord_[A-Za-z0-9_-]{43}$/.test(made.key));
 const onDisk = fs.readFileSync(file, 'utf8');
@@ -36,7 +36,24 @@ const over = gate.check(req({ 'x-api-key': made.key }, '10.9.9.9'));
 check('a key has its own limit, from any address', over.status === 429);
 check('a wrong key is refused with 401 (it does not fall back to keyless)', gate.check(req({ 'x-api-key': 'shord_' + 'a'.repeat(43) }, '10.0.0.3')).status === 401);
 check('a malformed key is refused with 401', gate.check(req({ 'x-api-key': 'hello' }, '10.0.0.3')).status === 401);
-check('calls are counted for the key (refused ones are not)', Object.values(gate.usage.of(made.id))[0] === 5);
+check('units are counted for the key (refused ones are not)', Object.values(gate.usage.of(made.id))[0] === 5);
+check('the answer says what is left today', k1.headers['x-ratelimit-daily-limit'] === '12' && k1.headers['x-ratelimit-daily-remaining'] === '11');
+
+// cost: a heavy route counts for more
+const heavy = gate.store.create('heavy user', 25, 100);
+const h1 = gate.check(req({ 'x-api-key': heavy.key }, '10.0.0.7'), 20);
+check('a 20-unit call passes and leaves 5', h1.ok && h1.headers['x-ratelimit-remaining'] === '5');
+check('a second 20-unit call in the same minute is refused', gate.check(req({ 'x-api-key': heavy.key }, '10.0.0.7'), 20).status === 429);
+check('a 1-unit call still fits', gate.check(req({ 'x-api-key': heavy.key }, '10.0.0.7'), 1).ok);
+
+// the daily cap
+const day = gate.store.create('daily cap', 1000, 30);
+for (let i = 0; i < 30; i++) gate.check(req({ 'x-api-key': day.key }, '10.0.0.8'), 1);
+const capped = gate.check(req({ 'x-api-key': day.key }, '10.0.0.8'), 1);
+check('the daily cap refuses with 429 and says when it resets', capped.status === 429 && /today/.test(capped.error) && Number(capped.headers['retry-after']) >= 1 && capped.headers['x-ratelimit-daily-remaining'] === '0');
+check('raising the limits lets the key through again', gate.store.setLimits(day.id, { daily: 31 }) && gate.check(req({ 'x-api-key': day.key }, '10.0.0.8'), 1).ok);
+check('limits refuse nonsense', (() => { try { gate.store.setLimits(day.id, { daily: 0 }); return false; } catch { return true; } })());
+check('defaults are 60 a minute and 5000 a day', DEFAULT_LIMIT === 60 && DEFAULT_DAILY === 5000 && gate.store.create('defaults').limit === 60 && gate.store.create('defaults 2').daily === 5000);
 
 // revoke
 check('revoke answers true for a live key', gate.store.revoke(made.id) === true);
@@ -51,12 +68,13 @@ check('the command line prints a new key once', !!cliKey);
 gate.store.checked = 0; // (the running indexer looks again after 3 s; the test does not wait)
 check('the running gate accepts it without a restart', gate.check(req({ 'x-api-key': cliKey })).ok);
 const list = execFileSync(process.execPath, [cli, 'list'], { env: { ...process.env, API_KEYS_FILE: file }, encoding: 'utf8' });
-check('list shows both keys, one revoked, and no key text', /REVOKED/.test(list) && /active/.test(list) && !list.includes(cliKey) && !list.includes(made.key));
+check('list shows the keys, one revoked, and no key text', /REVOKED/.test(list) && /active/.test(list) && !list.includes(cliKey) && !list.includes(made.key));
 
 // keys required
 const strict = makeGate({ keysFile: file, required: true });
 check('with keys required, a call without one gets 401', strict.check(req()).status === 401);
 check('with keys required, a valid key passes', strict.check(req({ 'x-api-key': cliKey })).ok);
+check('with keys required, an open route still answers keyless (shared limit)', strict.check(req({}, '10.0.0.9'), 1, { open: true }).ok);
 
 // who is calling, behind proxies
 const fwd = { headers: { 'x-forwarded-for': '1.1.1.1, 2.2.2.2' }, socket: { remoteAddress: '3.3.3.3' } };
@@ -71,7 +89,7 @@ const t0 = 1_700_000_000_000 - (1_700_000_000_000 % 60_000);
 lim.take('x', 1, t0);
 check('the limit holds inside the minute', !lim.take('x', 1, t0 + 59_000).ok);
 check('and resets in the next minute', lim.take('x', 1, t0 + 60_000).ok);
-check('a fresh store on the same file sees the same keys', new KeyStore(file).list().length === 2);
+check('a fresh store on the same file sees the same keys', new KeyStore(file).list().length === gate.store.list().length && gate.store.list().length >= 6);
 
 gate.usage.flush();
 check('usage is written next to the keys file', fs.existsSync(path.join(dir, 'usage.json')));

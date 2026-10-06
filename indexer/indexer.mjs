@@ -28,8 +28,11 @@
 //
 // Serving other people (optional): API keys and request limits, see indexer/keys.mjs
 //   API_KEYS_FILE=api-keys.json  [API_KEY_REQUIRED=1]  [PUBLIC_LIMIT=30]  [TRUST_PROXY=<proxy hops>]
+//   Answers are built once per block, served compressed, and a client that sends If-None-Match gets
+//   a 304 for an unchanged answer. /state costs 20 units (5 with ?since=), everything else 1.
 //   [ADMIN_SECRET=<long secret>]   turns on key management over HTTP (POST/GET /admin/keys)
 import http from 'node:http';
+import zlib from 'node:zlib';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -164,10 +167,12 @@ async function admin(req, url, send) {
   if (req.method === 'GET' && url.pathname === '/admin/keys') return send(200, gate.store.list().map((k) => ({ ...k, usage: gate.usage.of(k.id) })));
   if (req.method === 'POST' && url.pathname === '/admin/keys') {
     const b = await readBody(req);
-    const limit = b.limit === undefined ? 600 : Number(b.limit);
     if (typeof b.label !== 'string' || !b.label.trim()) return send(400, { error: 'label is needed: who the key is for' });
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100_000) return send(400, { error: 'limit must be a whole number of requests per minute' });
-    return send(200, gate.store.create(b.label.trim(), limit));
+    try { return send(200, gate.store.create(b.label.trim(), b.limit === undefined ? undefined : Number(b.limit), b.daily === undefined ? undefined : Number(b.daily))); } catch (e) { return send(400, { error: e.message }); }
+  }
+  if (req.method === 'POST' && url.pathname === '/admin/keys/limits') {
+    const b = await readBody(req);
+    try { return gate.store.setLimits(String(b.id ?? ''), { limit: b.limit === undefined ? undefined : Number(b.limit), daily: b.daily === undefined ? undefined : Number(b.daily) }) ? send(200, { id: b.id, limit: b.limit, daily: b.daily }) : send(404, { error: 'no active key with that id' }); } catch (e) { return send(400, { error: e.message }); }
   }
   if (req.method === 'POST' && url.pathname === '/admin/keys/revoke') {
     const b = await readBody(req);
@@ -186,29 +191,62 @@ const nameRoute = (p) => {
   return rec ? { code: 200, body: { name: rec.name, address: rec.to, id: rec.id, height: rec.height } } : { code: 404, body: { error: 'nobody has that name' } };
 };
 
+// What a request costs in units (keys.mjs): the full state is the one heavy answer.
+const costOf = (pathname, q) => (pathname === '/state' ? (Number(q.get('since')) > 0 ? 5 : 20) : 1);
+// Routes anyone may read even when keys are required: tiny, and what a wallet needs to find us.
+const OPEN = new Set(['/status']);
+
+// Every answer is built once per block (the state only changes when a block lands) and kept
+// compressed, so a thousand readers cost one build. ETag = block + route, so a client that asks
+// again with If-None-Match gets a 304 and no bytes.
+const built = new Map(); // key -> { height, json, gz, etag }
+const answer = (key, height, build) => {
+  const hit = built.get(key);
+  if (hit && hit.height === height) return hit;
+  if (built.size > 200) for (const k of built.keys()) { if (!k.startsWith('/status')) built.delete(k); if (built.size <= 100) break; }
+  const json = JSON.stringify(build());
+  const a = { height, json, gz: json.length > 1024 ? zlib.gzipSync(json) : null, etag: `"${height}-${crypto.createHash('sha256').update(key).digest('hex').slice(0, 12)}"` };
+  built.set(key, a);
+  return a;
+};
+
 http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://x');
   let extra = {};
+  const base = () => ({ 'access-control-allow-origin': '*', 'access-control-allow-headers': 'x-api-key, authorization, if-none-match', 'access-control-expose-headers': 'etag, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-daily-limit, x-ratelimit-daily-remaining, retry-after', ...extra });
   const send = (code, body) => {
-    res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'x-api-key, authorization', 'cache-control': 'no-store', ...extra });
+    res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', ...base() });
     res.end(JSON.stringify(body));
   };
   try {
-    if (req.method === 'OPTIONS') { res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'x-api-key, authorization', 'access-control-allow-methods': 'GET' }); return res.end(); }
+    if (req.method === 'OPTIONS') { res.writeHead(204, { ...base(), 'access-control-allow-methods': 'GET' }); return res.end(); }
     if (url.pathname === '/health') return send(200, { ok: true });
     if (url.pathname.startsWith('/admin/')) return gate && ADMIN ? await admin(req, url, send) : send(404, { error: 'not found' });
     const route = routes[url.pathname];
     const isName = url.pathname.startsWith('/names/') && url.pathname.length > '/names/'.length;
     if (req.method !== 'GET' || (!route && !isName)) return send(404, { error: 'not found' });
+    const ix = chain.ix();
+    if (!ix) {
+      if (gate) { const g = gate.check(req, 1, { open: OPEN.has(url.pathname) }); extra = g.headers; if (!g.ok) return send(g.status, { error: g.error }); }
+      return send(503, { error: 'still syncing' });
+    }
+    // what the answer would be, so an unchanged one is charged as a small call, not a heavy one
+    const key = url.pathname + (isName ? '' : '?' + [...url.searchParams].sort().map(([k, v]) => k + '=' + v).join('&'));
+    const names = isName ? nameRoute(url.pathname) : null;
+    const height = isName ? (namesOf()?.height ?? ix.lastHeight) : ix.lastHeight;
+    const a = isName ? answer(key, height, () => names.body) : answer(key, height, () => route(ix, url.searchParams));
+    const unchanged = req.headers['if-none-match'] === a.etag;
     if (gate) {
-      const g = gate.check(req);
+      const g = gate.check(req, unchanged ? 1 : costOf(url.pathname, url.searchParams), { open: OPEN.has(url.pathname) });
       extra = g.headers;
       if (!g.ok) return send(g.status, { error: g.error });
     }
-    if (isName) { const r = nameRoute(url.pathname); return send(r.code, r.body); }
-    const ix = chain.ix();
-    if (!ix) return send(503, { error: 'still syncing' });
-    send(200, route(ix, url.searchParams));
+    const code = isName ? names.code : 200;
+    const head = { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base() };
+    if (unchanged && code === 200) { res.writeHead(304, head); return res.end(); }
+    if (a.gz && /gzip/.test(String(req.headers['accept-encoding'] ?? ''))) { res.writeHead(code, { ...head, 'content-encoding': 'gzip' }); return res.end(a.gz); }
+    res.writeHead(code, head);
+    res.end(a.json);
   } catch (e) { send(500, { error: e.message }); }
 }).listen(PORT, async () => {
   console.error(`listening on :${PORT}`);
