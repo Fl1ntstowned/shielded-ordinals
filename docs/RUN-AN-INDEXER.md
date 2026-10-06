@@ -83,6 +83,10 @@ To sync once, print the status and exit:
 BITCOIN_RPC=… COLLECTION=shielded-nakas node indexer/indexer.mjs --once
 ```
 
+## Running it as a service
+
+`npm start` runs the indexer. It reads `PORT` from the environment, answers `/health` as soon as the process is up (and `503 still syncing` on the other routes until the first replay finishes), and keeps its block cache in `CACHE_DIR`. On a host that gives you a persistent disk, point `CACHE_DIR` at it so a restart replays from disk instead of asking the node for every block again. Behind a reverse proxy, set `TRUST_PROXY` to the number of proxy hops so request limits see the real caller.
+
 ## Settings
 
 | Variable | Meaning | Default |
