@@ -1,0 +1,36 @@
+{
+  "name": "shielded-ordinals",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test/api-keys.mjs && node test/node-source.mjs",
+    "test:node": "node test/node-source.mjs",
+    "test:keys": "node test/api-keys.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "description": "Shielded Ordinals: protocol, circuits, indexer, relayer, names",
+  "dependencies": {
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@scure/base": "^2.4.0",
+    "@scure/btc-signer": "^1.8.1",
+    "bitcoinjs-lib": "^6.1.8",
+    "circom2": "^0.2.23",
+    "circomlib": "^2.0.5",
+    "circomlibjs": "^0.1.7",
+    "micro-ordinals": "^0.2.2",
+    "poseidon-lite": "^0.3.0",
+    "snarkjs": "^0.7.6",
+    "tiny-secp256k1": "^2.2.4"
+  },
+  "type": "module",
+  "devDependencies": {
+    "assert": "^2.1.0",
+    "buffer": "^6.0.3",
+    "esbuild": "^0.25.12",
+    "events": "^3.3.0"
+  }
+}
