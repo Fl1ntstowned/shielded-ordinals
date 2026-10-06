@@ -6,7 +6,7 @@
 //   node tools/names-indexer.mjs                          sync mainnet, print { height, count, digest }
 //   node tools/names-indexer.mjs --network signet
 //   node tools/names-indexer.mjs --api http://localhost:3000/api   your node
-//   node tools/names-indexer.mjs --lookup bob.naka        the address a name points at
+//   node tools/names-indexer.mjs --lookup obi.naka        the address a name points at
 //   node tools/names-indexer.mjs --list                   every name, in order
 //   node tools/names-indexer.mjs --compare https://<host>/api/shielded/names/info
 //                                                         does another indexer hold the same names?

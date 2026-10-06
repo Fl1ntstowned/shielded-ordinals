@@ -1,12 +1,12 @@
-// Shielded Ordinals v1 — shielded names: "bob.naka" / "bob.shield" in place of a shielded address.
+// Shielded Ordinals v1 — shielded names: "obi.naka" / "obi.shield" in place of a shielded address.
 // METADATA ONLY: nothing in the protocol's acceptance rules depends on it.
 //
 //   A name = an ordinary ord inscription (application/json or text/plain) whose whole content is
-//       {"p":"shord","op":"name","name":"bob.naka","to":"shord1…"}
+//       {"p":"shord","op":"name","name":"obi.naka","to":"shord1…"}
 //   Anyone may inscribe one, with any inscribing tool. No parent, no fee rule, no signature.
 //   First is first: the EARLIEST valid inscription of a label wins, in block order, then tx order in
 //   the block, then inscription order in the tx. Later ones are ignored for ever.
-//   The label (the part before the dot) is unique across both endings: bob.naka blocks bob.shield.
+//   The label (the part before the dot) is unique across both endings: obi.naka blocks obi.shield.
 //   The name must be written exactly as it is used: lowercase, no spaces. Anything else is not a name.
 //   `to` is fixed by the inscription: moving or selling the inscription never changes where it points.
 // Every indexer that replays the same blocks gets the same names. To make that checkable:
@@ -88,7 +88,7 @@ export class NameIndex {
     }
   }
 
-  /** The record a full name ("bob.naka") resolves to, or null. */
+  /** The record a full name ("obi.naka") resolves to, or null. */
   resolve(full) {
     const n = parseName(full);
     const rec = n ? this.byLabel.get(n.label) : null;

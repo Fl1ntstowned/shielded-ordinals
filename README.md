@@ -17,7 +17,7 @@ There is no token, no sidechain and no bridge. Everything is in Bitcoin blocks.
 | `indexer/` | An indexer anyone can run against their own Bitcoin node, with a read API |
 | `relayer/` | A relayer anyone can run: publishes private sends and listings in batches |
 | `cosigner/` | Co-signer software for collections that use 2-of-3 co-signers |
-| `tools/names-indexer.mjs` | A stand-alone index of shielded names (`bob.naka`) |
+| `tools/names-indexer.mjs` | A stand-alone index of shielded names (`obi.naka`) |
 | `test/` | The offline test suite |
 
 ## What is not here

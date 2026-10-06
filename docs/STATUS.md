@@ -10,7 +10,7 @@ Last checked 2026-10-05. Everything here was tested or read from Bitcoin on that
 | First collection | Shielded Nakas, 3,333 pieces, global numbers #0 to #3332. Parent inscription `896803ff66162b1956ccaa3a15723e9c3acd3cbfd81acadbc94812c3ad4fb3cci0`, block 969343 |
 | Minted | 3,327 pieces. 6 are in mint transactions that have not confirmed |
 | Activity at block 970094 | 5,034 notes, about 595 active listings |
-| Names | Live since block 969800 (`bob.naka`, `bob.shield`), 12 names |
+| Names | Live since block 969800 (`obi.naka`, `obi.shield`), 12 names |
 | Indexer start block | 969342 for the collection and for global numbering |
 
 ## Proven
