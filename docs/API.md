@@ -3,7 +3,7 @@
 Every Shielded Ordinals indexer answers the same read API. You can call:
 
 - **your own indexer**, at `http://127.0.0.1:5021` after following [RUN-AN-INDEXER.md](RUN-AN-INDEXER.md). No key, no limit.
-- **the hosted API run by Ord Dropz**, at `https://API_HOST`, with an API key from Ord Dropz. Every call needs the key except `/status` and `/health`.
+- **the hosted API run by Ord Dropz**, at `https://shielded-public-api-production.up.railway.app`, with an API key from Ord Dropz. Every call needs the key except `/status` and `/health`.
 
 Both give the same answers at the same block. Everything served is public data read from Bitcoin. Nothing in this API can move a piece or reveal who holds one.
 
@@ -20,7 +20,7 @@ shord_Zr3kP0c1x7Qe9b2mV5tY8uA4wL6nH1sD0fG3jK7oXcE
 Send it in a header on every call:
 
 ```
-curl -H "x-api-key: shord_…" https://API_HOST/status
+curl -H "x-api-key: shord_…" https://shielded-public-api-production.up.railway.app/status
 ```
 
 `Authorization: Bearer shord_…` works the same. Keep the key on your server. Don't put it in a web page or an app that people download, because anyone who reads it can use up your allowance.
@@ -51,9 +51,9 @@ The minute resets at the start of each clock minute; the day resets at midnight 
 Every answer carries an `etag`. Send it back as `If-None-Match` on your next call. If nothing changed (no new block), you get `304 Not Modified`, no body, and it costs 1 unit instead of the route's price.
 
 ```
-curl -i -H "x-api-key: shord_…" https://API_HOST/state
+curl -i -H "x-api-key: shord_…" https://shielded-public-api-production.up.railway.app/state
 # ... etag: "970094-f24cd53beddf"
-curl -i -H "x-api-key: shord_…" -H 'If-None-Match: "970094-f24cd53beddf"' https://API_HOST/state
+curl -i -H "x-api-key: shord_…" -H 'If-None-Match: "970094-f24cd53beddf"' https://shielded-public-api-production.up.railway.app/state
 # HTTP/1.1 304 Not Modified
 ```
 
@@ -85,7 +85,7 @@ Poll `/status` (1 unit, no key needed). Read `/state` or `/listings` again only 
 Where the indexer stands.
 
 ```
-curl https://API_HOST/status
+curl https://shielded-public-api-production.up.railway.app/status
 ```
 
 ```json
@@ -193,7 +193,7 @@ Two indexers at the same `height` with the same `digest` hold the same names.
 The shielded address a name points at.
 
 ```
-curl https://API_HOST/names/obi.naka
+curl https://shielded-public-api-production.up.railway.app/names/obi.naka
 ```
 
 ```json
@@ -244,10 +244,10 @@ node indexer/keys.mjs revoke <id>
 Or over HTTP, when `ADMIN_SECRET` is set:
 
 ```
-curl -X POST https://API_HOST/admin/keys -H "x-admin-secret: …" -H "content-type: application/json" -d '{"label":"who it is for","limit":60,"daily":5000}'
-curl -X POST https://API_HOST/admin/keys/limits -H "x-admin-secret: …" -H "content-type: application/json" -d '{"id":"<id>","limit":300,"daily":20000}'
-curl https://API_HOST/admin/keys -H "x-admin-secret: …"
-curl -X POST https://API_HOST/admin/keys/revoke -H "x-admin-secret: …" -H "content-type: application/json" -d '{"id":"<id>"}'
+curl -X POST https://shielded-public-api-production.up.railway.app/admin/keys -H "x-admin-secret: …" -H "content-type: application/json" -d '{"label":"who it is for","limit":60,"daily":5000}'
+curl -X POST https://shielded-public-api-production.up.railway.app/admin/keys/limits -H "x-admin-secret: …" -H "content-type: application/json" -d '{"id":"<id>","limit":300,"daily":20000}'
+curl https://shielded-public-api-production.up.railway.app/admin/keys -H "x-admin-secret: …"
+curl -X POST https://shielded-public-api-production.up.railway.app/admin/keys/revoke -H "x-admin-secret: …" -H "content-type: application/json" -d '{"id":"<id>"}'
 ```
 
 The first answers with the new key. The second lists every key with its calls per day.
@@ -255,8 +255,8 @@ The first answers with the new key. The second lists every key with its calls pe
 The same three commands work from your own machine against that indexer, so you never handle the HTTP calls yourself. Keep the admin secret in a file:
 
 ```
-node indexer/keys.mjs create "who it is for" 60 5000 --at https://API_HOST --secret-file ~/.secrets/indexer-admin.txt
-node indexer/keys.mjs limits <id> 300 20000 --at https://API_HOST --secret-file ~/.secrets/indexer-admin.txt
-node indexer/keys.mjs list --at https://API_HOST --secret-file ~/.secrets/indexer-admin.txt
-node indexer/keys.mjs revoke <id> --at https://API_HOST --secret-file ~/.secrets/indexer-admin.txt
+node indexer/keys.mjs create "who it is for" 60 5000 --at https://shielded-public-api-production.up.railway.app --secret-file ~/.secrets/indexer-admin.txt
+node indexer/keys.mjs limits <id> 300 20000 --at https://shielded-public-api-production.up.railway.app --secret-file ~/.secrets/indexer-admin.txt
+node indexer/keys.mjs list --at https://shielded-public-api-production.up.railway.app --secret-file ~/.secrets/indexer-admin.txt
+node indexer/keys.mjs revoke <id> --at https://shielded-public-api-production.up.railway.app --secret-file ~/.secrets/indexer-admin.txt
 ```
