@@ -192,7 +192,7 @@ const nameRoute = (p) => {
 };
 
 // What a request costs in units (keys.mjs): the full state is the one heavy answer.
-const costOf = (pathname, q) => (pathname === '/state' ? (Number(q.get('since')) > 0 ? 5 : 20) : 1);
+const costOf = (pathname, since) => (pathname === '/state' ? (since > 0 ? 5 : 20) : 1);
 // Routes anyone may read even when keys are required: tiny, and what a wallet needs to find us.
 const OPEN = new Set(['/status']);
 
@@ -200,12 +200,15 @@ const OPEN = new Set(['/status']);
 // compressed, so a thousand readers cost one build. ETag = block + route, so a client that asks
 // again with If-None-Match gets a 304 and no bytes.
 const built = new Map(); // key -> { height, json, gz, etag }
+const etagOf = (key, height) => `"${height}-${crypto.createHash('sha256').update(key).digest('hex').slice(0, 12)}"`;
 const answer = (key, height, build) => {
   const hit = built.get(key);
   if (hit && hit.height === height) return hit;
   if (built.size > 200) for (const k of built.keys()) { if (!k.startsWith('/status')) built.delete(k); if (built.size <= 100) break; }
+  // partial states are as many as there are `since` values, and each can be nearly the whole state: keep a few
+  if (key.includes('?since=')) { const parts = [...built.keys()].filter((k) => k.includes('?since=')); if (parts.length >= 8) built.delete(parts[0]); }
   const json = JSON.stringify(build());
-  const a = { height, json, gz: json.length > 1024 ? zlib.gzipSync(json) : null, etag: `"${height}-${crypto.createHash('sha256').update(key).digest('hex').slice(0, 12)}"` };
+  const a = { height, json, gz: json.length > 1024 ? zlib.gzipSync(json) : null, etag: etagOf(key, height) };
   built.set(key, a);
   return a;
 };
@@ -230,18 +233,23 @@ http.createServer(async (req, res) => {
       if (gate) { const g = gate.check(req, 1, { open: OPEN.has(url.pathname) }); extra = g.headers; if (!g.ok) return send(g.status, { error: g.error }); }
       return send(503, { error: 'still syncing' });
     }
-    // what the answer would be, so an unchanged one is charged as a small call, not a heavy one
-    const key = url.pathname + (isName ? '' : '?' + [...url.searchParams].sort().map(([k, v]) => k + '=' + v).join('&'));
-    const names = isName ? nameRoute(url.pathname) : null;
+    // The cache key names the answer, not the URL as typed: only `since` changes /state and nothing
+    // changes the others, so a stranger can't make the indexer build and keep a copy per query string.
+    const since = url.pathname === '/state' ? Math.max(0, Math.floor(Number(url.searchParams.get('since')) || 0)) : 0;
+    const key = url.pathname + (since ? `?since=${since}` : '');
     const height = isName ? (namesOf()?.height ?? ix.lastHeight) : ix.lastHeight;
-    const a = isName ? answer(key, height, () => names.body) : answer(key, height, () => route(ix, url.searchParams));
-    const unchanged = req.headers['if-none-match'] === a.etag;
+    // The ETag is known before anything is built, so the gate goes first: a refused call never costs
+    // a build, and an unchanged answer is charged as a small call, not a heavy one.
+    const unchanged = req.headers['if-none-match'] === etagOf(key, height);
     if (gate) {
-      const g = gate.check(req, unchanged ? 1 : costOf(url.pathname, url.searchParams), { open: OPEN.has(url.pathname) });
+      const g = gate.check(req, unchanged ? 1 : costOf(url.pathname, since), { open: OPEN.has(url.pathname) });
       extra = g.headers;
       if (!g.ok) return send(g.status, { error: g.error });
     }
-    const code = isName ? names.code : 200;
+    const names = isName ? nameRoute(url.pathname) : null;
+    if (names && names.code !== 200) return send(names.code, names.body); // a miss is not kept: unknown names are endless
+    const a = isName ? answer(key, height, () => names.body) : answer(key, height, () => route(ix, new URLSearchParams(since ? { since: String(since) } : {})));
+    const code = 200;
     const head = { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base() };
     if (unchanged && code === 200) { res.writeHead(304, head); return res.end(); }
     if (a.gz && /gzip/.test(String(req.headers['accept-encoding'] ?? ''))) { res.writeHead(code, { ...head, 'content-encoding': 'gzip' }); return res.end(a.gz); }
