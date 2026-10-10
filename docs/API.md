@@ -3,7 +3,7 @@
 Every Shielded Ordinals indexer answers the same read API. You can call:
 
 - **your own indexer**, at `http://127.0.0.1:5021` after following [RUN-AN-INDEXER.md](RUN-AN-INDEXER.md). No key, no limit.
-- **the hosted API run by Ord Dropz**, at `https://shielded-public-api-production.up.railway.app`, with an API key from Ord Dropz. Every call needs the key except `/status` and `/health`.
+- **the hosted API run by Ord Dropz**, at `https://shielded-public-api-production.up.railway.app`, with an API key from Ord Dropz. Every call needs the key except `/status`, `/collections` and `/health`.
 
 Both give the same answers at the same block. Everything served is public data read from Bitcoin. Nothing in this API can move a piece or reveal who holds one.
 
@@ -165,6 +165,29 @@ A listing's `state` is `ACTIVE` (for sale), `SOLD`, `CLOSED` (cancelled, waiting
 
 Numbers too large for JSON (`cm`, `nf`, `root`, `price`) are decimal strings.
 
+### `GET /collections`
+
+Every shielded collection this indexer follows. The indexer finds them on Bitcoin itself: every parent inscription whose content is valid rules gets its own copy of the rules engine, replayed from its parent's block.
+
+```json
+[
+  { "cid": "a1e7879252940f5e", "parent": "896803ff…i0", "name": "Shielded Nakas", "kind": "collection", "supply": 3333, "startBlock": 969342,
+    "range": { "start": 0, "end": 3332, "height": 969349, "txid": "258e66c5…" }, "lastHeight": 970094, "notes": 5034, "digest": "1922…", "primary": true }
+]
+```
+
+A collection that pinned a different proof verification key than this software carries is listed with `"skipped"` and the reason; its routes answer `409`.
+
+### `GET /c/<cid>/…`
+
+`/status`, `/state`, `/listings` and `/collection` for one collection, by its `cid` from `/collections`:
+
+```
+curl -H "x-api-key: shord_…" https://shielded-public-api-production.up.railway.app/c/a1e7879252940f5e/listings
+```
+
+The routes without `/c/<cid>/` answer for the indexer's primary collection (Shielded Nakas on the hosted API). They never change meaning when a new collection appears.
+
 ### `GET /registry`
 
 Every shielded collection found on Bitcoin, in global number order.
@@ -223,7 +246,7 @@ API_KEYS_FILE=/data/api-keys.json node indexer/indexer.mjs
 | Variable | Meaning | Default |
 |---|---|---|
 | `API_KEYS_FILE` | Where key hashes are kept. Setting it turns keys and limits on | off |
-| `API_KEY_REQUIRED` | `1` refuses every call without a key, except `/status` and `/health` | `0` |
+| `API_KEY_REQUIRED` | `1` refuses every call without a key, except `/status`, `/collections` and `/health` | `0` |
 | `PUBLIC_LIMIT` | Requests a minute for callers without a key, per address | `30` |
 | `TRUST_PROXY` | How many proxies stand in front of the indexer. The caller's address is read that many steps back in `X-Forwarded-For`. Leave `0` when callers connect directly | `0` |
 | `ADMIN_SECRET` | A long secret that turns on key management over HTTP | off |

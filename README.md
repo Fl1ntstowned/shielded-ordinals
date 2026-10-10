@@ -14,7 +14,7 @@ There is no token, no sidechain and no bridge. Everything is in Bitcoin blocks.
 | `src/v1/` | The reference implementation of the rules: envelopes, rules, indexer, registry, names, chain reader |
 | `circuits/` | The proof circuits (circom) |
 | `zk/` | The verification keys the indexer checks proofs with |
-| `indexer/` | An indexer anyone can run against their own Bitcoin node, with a read API |
+| `indexer/` | An indexer anyone can run against their own Bitcoin node, with a read API. It follows every shielded collection it finds on chain |
 | `relayer/` | A relayer anyone can run: publishes private sends and listings in batches |
 | `cosigner/` | Co-signer software for collections that use 2-of-3 co-signers |
 | `tools/names-indexer.mjs` | A stand-alone index of shielded names (`obi.naka`) |

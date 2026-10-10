@@ -98,6 +98,7 @@ BITCOIN_RPC=… COLLECTION=shielded-nakas node indexer/indexer.mjs --once
 | `RULES_INSCRIPTION_ID` | Any other collection: its parent inscription id | none |
 | `START_HEIGHT` | Any other collection: the block to start from, at or before the parent's block | none |
 | `RULES_BLOCK` | Any other collection: hash of the block holding the parent. A node without `txindex` needs it | none |
+| `FOLLOW_ALL` | `0` follows only the collection given above. By default every shielded collection found on Bitcoin is followed too, each with its own copy of the rules engine, all sharing the block cache | `1` |
 | `NETWORK` | `mainnet` or `signet` | `mainnet` |
 | `PORT` | Port the read API listens on | `5021` |
 | `CACHE_DIR` | Where read blocks are kept | `.cache-indexer` |
@@ -115,6 +116,8 @@ Every route is a `GET` and answers JSON.
 | `/listings` | Active listings: piece, price, sale fee, credits |
 | `/collection` | The collection's rules, minted count, global number range |
 | `/registry` | Every shielded collection found on Bitcoin, with its global number range |
+| `/collections` | Every collection this indexer follows, with each one's last block, note count and digest |
+| `/c/<cid>/…` | `/status`, `/state`, `/listings`, `/collection` for one collection by its cid |
 
 Field-by-field descriptions are in [API.md](API.md).
 
