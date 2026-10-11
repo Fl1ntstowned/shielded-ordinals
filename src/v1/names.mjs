@@ -15,6 +15,8 @@
 //   - the index keeps a running digest, sha256(previous digest | height | inscription id | name | to)
 //     over every accepted name in order. Two indexers at the same height with the same digest hold
 //     exactly the same names. An indexer publishes { height, count, digest }; anyone can compare.
+//   - the list can be read in pages (page()), each with the running digest before its first name, so
+//     a reader recomputes the chain from NAMES_GENESIS page by page and ends on the published digest.
 import { sha256 } from '@noble/hashes/sha2.js';
 
 export const NAME_ENDINGS = ['naka', 'shield'];
@@ -22,6 +24,12 @@ export const NAME_MAX_BYTES = 400;
 /** The first block names count from (fixed for ever; earlier inscriptions are not names). */
 export const NAMES_START = { mainnet: 969800, signet: 324867 };
 const GENESIS_DIGEST = Buffer.from(sha256(Buffer.from('shord-names-v1'))).toString('hex');
+/** The running digest before the first name: sha256('shord-names-v1'), hex. */
+export const NAMES_GENESIS = GENESIS_DIGEST;
+/** One link of the running digest: the digest after `rec` ({ height, id, name, to }) when `prev` came before it. */
+export const nextNamesDigest = (prev, rec) => Buffer.from(sha256(Buffer.from(`${prev}|${rec.height}|${rec.id}|${rec.name}|${rec.to}`))).toString('hex');
+/** Names in one page of GET /names. */
+export const NAMES_PAGE = 500;
 const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{1,18})[a-z0-9]$/;
 const ADDRESS_RE = /^shord1[0-9a-f]{128}$/;
 
@@ -67,6 +75,7 @@ export class NameIndex {
   constructor(start = null) {
     this.start = start;
     this.list = []; // every accepted record, in order
+    this.digests = []; // digests[i] = the running digest before list[i] (a page's digestBefore)
     this.digest = GENESIS_DIGEST;
     this.height = null; // last block applied
     this.byLabel = new Map(); // label -> { name, label, to, id, height }
@@ -81,7 +90,8 @@ export class NameIndex {
       if (this.byLabel.has(n.label)) continue; // first is first
       const rec = { name: n.name, label: n.label, to: n.to, id: n.id, height };
       this.list.push(rec);
-      this.digest = Buffer.from(sha256(Buffer.from(`${this.digest}|${height}|${n.id}|${n.name}|${n.to}`))).toString('hex');
+      this.digests.push(this.digest);
+      this.digest = nextNamesDigest(this.digest, rec);
       this.byLabel.set(n.label, rec);
       const list = this.byAddress.get(n.to);
       if (list) list.push(rec); else this.byAddress.set(n.to, [rec]);
@@ -100,4 +110,21 @@ export class NameIndex {
   state() { return { start: this.start, height: this.height, count: this.list.length, digest: this.digest }; }
   /** Every name pointing at a shielded address, earliest first. */
   of(address) { return this.byAddress.get(address) ?? []; }
+
+  /**
+   * Up to `n` names from place `after` (0 = the first name): { after, digestBefore, names: [{ i, name,
+   * to, id, height }], next }. digestBefore is the running digest before names[0] (the digest itself
+   * when the page is empty); next is the `after` of the following page, or null after the last name.
+   * Recomputing the digest over every page from NAMES_GENESIS ends on state().digest.
+   * (`list` is the records themselves, so this reader is page().)
+   */
+  page(after = 0, n = NAMES_PAGE) {
+    if (!Number.isSafeInteger(after) || after < 0 || after > this.list.length) throw new Error(`after must be 0 to ${this.list.length}`);
+    if (!Number.isSafeInteger(n) || n < 1) throw new Error('a page holds 1 name or more');
+    // an index restored without digests[] (a saved state from before it existed) gets them back
+    for (let i = this.digests.length; i < this.list.length; i++) this.digests.push(i ? nextNamesDigest(this.digests[i - 1], this.list[i - 1]) : GENESIS_DIGEST);
+    const rows = this.list.slice(after, after + n).map((r, k) => ({ i: after + k, name: r.name, to: r.to, id: r.id, height: r.height }));
+    const end = after + rows.length;
+    return { after, digestBefore: after < this.list.length ? this.digests[after] : this.digest, names: rows, next: end < this.list.length ? end : null };
+  }
 }
