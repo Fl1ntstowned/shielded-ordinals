@@ -120,6 +120,7 @@ The collection and its rules.
 | `minted` | Pieces minted so far |
 | `lastHeight` | The block this answer is from |
 | `global` | The collection's global number range, `{ "start": 0, "end": 3332, "height": …, "txid": … }`, or `null` before its first mint |
+| `pieces` | File-mint collections: `{ withChild, pages, art: { have, of, verified } }` from the piece index (see `/pieces/info`) |
 
 ### `GET /listings`
 
@@ -127,7 +128,7 @@ Pieces for sale now.
 
 ```json
 [
-  { "nf": "1830…", "assetId": 86, "inscriptionId": null, "price": "47800", "saleFee": "1000", "tickets": 2, "listedAt": 969650 }
+  { "nf": "1919…", "assetId": 2787, "inscriptionId": "6298006fb948…7159i175", "price": "1800000", "saleFee": "36000", "tickets": 3, "listedAt": 969485 }
 ]
 ```
 
@@ -135,6 +136,7 @@ Pieces for sale now.
 |---|---|
 | `nf` | The listing's id (the spent tag of the note that was listed), a decimal number in a string |
 | `assetId` | The piece number inside the collection, from 0 |
+| `inscriptionId` | The piece's child inscription: from the rules for a pre-inscribed collection, from the piece index (`/pieces`) for a file-mint one. `null` while the piece has no child |
 | `price` | Price in sats, in a string |
 | `saleFee` | The platform fee a buyer pays on top, in sats |
 | `tickets` | Relay credits that travel with the piece |
@@ -180,13 +182,61 @@ A collection that pinned a different proof verification key than this software c
 
 ### `GET /c/<cid>/…`
 
-`/status`, `/state`, `/listings` and `/collection` for one collection, by its `cid` from `/collections`:
+`/status`, `/state`, `/listings`, `/collection` and the `/pieces` routes for one collection, by its `cid` from `/collections`:
 
 ```
 curl -H "x-api-key: shord_…" https://shielded-public-api-production.up.railway.app/c/a1e7879252940f5e/listings
 ```
 
 The routes without `/c/<cid>/` answer for the indexer's primary collection (Shielded Nakas on the hosted API). They never change meaning when a new collection appears.
+
+### `GET /pieces/info`
+
+The piece index of a file-mint collection: which child inscription is which piece, read from Bitcoin. A child is an inscription in a tx that spends the parent inscription and names it as its parent; its piece is its metadata's `shielded.piece` (PROTOCOL-v1.md, "Children of a file-mint collection"). Metadata only: the state and its `digest` do not depend on it.
+
+```json
+{ "parent": "896803ff…i0", "parentAt": "e8f99351…4b:0", "supply": 3333, "minted": 3327, "withChild": 3327, "pages": 4, "perPage": 1000,
+  "art": { "root": "a6146695…128d", "have": 3327, "of": 3333, "verified": null }, "ignored": [], "digest": "d8fbcae2…e2d4", "height": 970121 }
+```
+
+| Field | Meaning |
+|---|---|
+| `parentAt` | The outpoint holding the parent inscription now, `"lost"` if its sat went to the fees (no later child counts), or `null` before its reveal |
+| `minted`, `withChild` | Pieces minted, and pieces with a child inscription |
+| `art` | `verified` is `true` or `false` once every piece has a child (`artRoot` recomputed from the children's content hashes), `null` until then |
+| `ignored` | Inscriptions that claimed the parent but are not a piece's child, with the reason (`piece already has a child`, `no shielded.piece`, `metadata unreadable`, …). The first 1,000; `ignoredTotal` appears when there are more |
+| `digest` | Running SHA-256 over every child taken. Two indexers at the same `height` with the same `digest` hold the same piece map |
+
+### `GET /pieces?page=<k>`
+
+Every piece in pages of 1,000 (`k` from 0 to `pages - 1`; anything else is a `404`, not charged). Compact rows with dictionaries local to the page:
+
+```json
+{ "v": 1, "page": 0, "pages": 4, "from": 0, "to": 999, "final": true, "contentType": "image/png", "name": "Shielded NAKAS #{global}", "globalStart": 0,
+  "txs": ["647652c7…", "13fdb17b…", "…"], "traits": ["Body", "Outfit", "Hair And Headwear", "Eyes", "Mouth", "Hoodie"], "values": ["Pepe", "Red Raglan", "Purple Crazy", "3D Glasses", "Clean", "…"],
+  "rows": [[0, 969349, 0, 0, 969350, [0, 0, 1, 1, 2, 2, 3, 3, 4, 4], "Shielded NAKAS #1"], [1, 969358, 1, 0, 969359, [0, 5, 1, 6, 2, 7, 3, 8, 4, 4], "Shielded NAKAS #2"], …] }
+```
+
+A row is `[assetId, mintHeight, childTx, childIndex, inscribedHeight, [traitIndex, valueIndex, …], name?]`:
+
+- `childTx` indexes `txs`: the child is `<txs[childTx]>i<childIndex>`. `null` (with `childIndex` and `inscribedHeight`) while the piece has no child; `mintHeight` is `null` for a child of a piece not minted.
+- Traits come from the child's metadata `attributes`, as pairs of indexes into `traits` and `values`. The `Shielded #` trait and the `shielded` block are left out: they are the global number and the piece.
+- The page's `name` is the rule most children of the page follow: replace `{global}` with the piece's global number, `globalStart + assetId`. A row ends with its own name only when its child's name differs from that rule (`null` when the child has no name). The page's `name` is `null` when no rule fits.
+- A piece neither minted nor inscribed has no row. The mint transaction is in `/pieces/<assetId>`.
+
+### `GET /pieces/<assetId>`
+
+One piece:
+
+```json
+{ "assetId": 1, "global": 1, "tier": "Sub 1K", "mint": { "height": 969358, "txid": "b194c3de…fcba" },
+  "child": { "id": "13fdb17b…i0", "height": 969359, "txid": "13fdb17b…", "contentType": "image/png", "size": 801, "sha256": "6d1c4863…", "delegate": null, "via": "metadata" },
+  "metadata": { "name": "Shielded NAKAS #2", "attributes": [ … ], "shielded": { "number": 1, "piece": 1, "parent": "896803ff…i0" } }, "final": true }
+```
+
+`via` is `metadata` (its `shielded.piece`) or `pinned` (a pin in `src/v1/collections.mjs` whose Merkle path to `artRoot` checks). `metadata` is the child's tag-5 metadata as inscribed (`null` when it has none, or more than 4 KB). No art bytes are served: fetch the content from any ord server and check it against `sha256`.
+
+The `/pieces` routes cost 1 unit each. Their ETag comes from the answer itself, so a page whose pieces did not change keeps its ETag from block to block, and `If-None-Match` gets a `304`. An answer whose pieces are all minted and inscribed, at least 6 blocks deep, has `"final": true` and is sent with `cache-control: private, max-age=31536000, immutable`. A collection without a piece index (pre-inscribed, or an indexer run with `PIECES=0`) answers `404`.
 
 ### `GET /registry`
 

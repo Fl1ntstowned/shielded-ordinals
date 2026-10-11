@@ -7,7 +7,7 @@ What is live, proven and still open is in `docs/STATUS.md`.
 The collection's **parent inscription** holds the rules JSON, parsed by `rules.mjs` `parseRules`. The fields are:
 - `supply`, and the art, in one of two modes:
   - **pre-inscribed:** `children`, the list of child inscription ids. A piece's `assetId` is its index.
-  - **file mint:** `artRoot` + `contentType`. `artRoot` is a Merkle root over every piece's file (`art.mjs`: leaf = sha256(0x00 ‖ u32le assetId ‖ sha256(file)), node = sha256(0x01 ‖ L ‖ R), an odd last node is carried up). Nothing is inscribed up front: after a piece is minted the platform inscribes it as a true child of the parent (tag 3) in batches, and anyone can check a child is piece N by its content hash + Merkle path. `inscribeFee` (sats per piece) pays for that inscription.
+  - **file mint:** `artRoot` + `contentType`. `artRoot` is a Merkle root over every piece's file (`art.mjs`: leaf = sha256(0x00 ‖ u32le assetId ‖ sha256(file)), node = sha256(0x01 ‖ L ‖ R), an odd last node is carried up). Nothing is inscribed up front: after a piece is minted the platform inscribes it as a true child of the parent (tag 3) in batches, and anyone can check a child is piece N by its content hash + Merkle path (see "Children of a file-mint collection" below). `inscribeFee` (sats per piece) pays for that inscription.
 - `mintPrice` and `artistPayoutScript`.
 - `mintFee`, `saleFeeBps` + `saleFeeMin` (paid to the platform), and `platformPayoutScript`.
 - `ticketPrice`.
@@ -17,6 +17,16 @@ The collection's **parent inscription** holds the rules JSON, parsed by `rules.m
 The indexer is pinned to one parent inscription id and reads the rules straight out of the parent's reveal tx (`inscribe.mjs` `rulesFromChain`); it needs no ord server. Every envelope carries `cid` = sha256(parent id)[0..8]; envelopes for other collections are ignored.
 
 The art sats sit at NUMS. The parent is parked at NUMS after the last child is inscribed, so the rules and supply can never change.
+
+## Children of a file-mint collection (metadata only)
+Which child inscription is which piece. Nothing in the acceptance rules depends on it: an indexer with or without it holds the same state and the same digest (`pieces.mjs`).
+- **A child** is an inscription in a tx that **spends the parent inscription**, whose parent tag (tag 3) names the parent. That is ord's rule for a child. An inscription that only names the parent in its tag is not a child.
+- **Its piece** is tag-5 metadata (CBOR) `shielded.piece`: an integer in `[0, supply)`. `shielded.parent`, when present, must be the parent's id. Inscribers write it: `{ "name": …, "attributes": […], "shielded": { "piece": 7, "parent": "<parent id>" } }` (`tools/prepare-art.mjs` puts `shielded.piece` in every `metadata.json` entry).
+- A child without a usable `shielded.piece` is placed only by a **pin** in `src/v1/collections.mjs`: the child id, its content hash and its Merkle path to `artRoot`. A pin counts only if the path checks. A piece is never placed by its display name, and never by elimination.
+- **The first child of a piece wins**, in block order, then tx order, then inscription order. Every later one is listed as ignored, with the reason.
+- **Following the parent:** from its reveal tx (the first sat of the input holding its envelope, or its pointer tag), then ord's first-in-first-out sat flow through each tx that spends it. If its sat goes to the fees, the parent is "lost" and no later child is recognised. (ord would move it into the coinbase; this index stops instead.)
+- **Checking:** a running digest over every child taken, in order: the next digest is sha256 of the text `<previous digest hex>|<height>|<child id>|<piece>|<content sha256 hex>`, starting from sha256 of `shord-pieces-v1`. Two indexers at the same height with the same digest hold the same piece map. Once every piece has a child, `artRoot` is recomputed from the children's content hashes and must equal the rules' `artRoot` (`art.verified`).
+- Only the txs that spend the parent are read in full, one request each, once. Finding them costs nothing: the indexer already keeps every tx's spent coins.
 
 ## Notes
 | | |
