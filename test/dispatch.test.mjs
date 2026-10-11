@@ -214,6 +214,9 @@ const port = A.port;
   // the names (indexer/routes/names.mjs) version is the registry's height plus its block hash tail
   const nameTags = await Promise.all(['/names/info', '/names/alice.naka'].map((u) => get(port, u)));
   check('server: names ETags are "<height>-<block hash tail 8>-<sha256(key)[0:12]>"', nameTags.every((r, i) => r.status === 200 && r.headers.etag === etagOf(V, ['/names/info', '/names/alice.naka'][i])), nameTags.map((r) => [r.status, r.headers.etag]));
+  // without RULES_FILE, /collection's rules are the parent's text exactly as inscribed (payout scripts included)
+  const gotRules = JSON.stringify(JSON.parse(tags[forms.findIndex(([u]) => u === '/collection')].body.toString()).rules);
+  check('server: /collection without RULES_FILE shows the rules exactly as inscribed', gotRules === JSON.stringify(JSON.parse(P.text)), gotRules);
   const cols = await get(port, '/collections');
   const list = cols.json();
   const all = list.map((c) => (c.lastHeight === null ? `${c.cid}:-` : `${c.cid}:${c.lastHeight}-${chain.hashAt(c.lastHeight).slice(-8)}`)).join(',');

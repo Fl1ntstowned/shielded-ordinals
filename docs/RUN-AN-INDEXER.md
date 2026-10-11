@@ -8,7 +8,7 @@ The indexer reads Bitcoin blocks from your own node, applies the Shielded Ordina
 |---|---|
 | Bitcoin Core | 25.0 or newer, synced. `txindex` is not needed. A pruned node works as long as it still holds every block from the collection's start block |
 | Node.js | 20 or newer |
-| Disk | about 1.5 MB per block followed |
+| Disk | about 1.5 MB per block followed, plus about 10 MB of checkpoints per collection |
 
 ### A pruned node
 
@@ -55,7 +55,7 @@ $env:COLLECTION = "shielded-nakas"
 node indexer/indexer.mjs
 ```
 
-The first start replays every block since the collection began and checks every proof. It prints its progress. Blocks it has read are kept in `.cache-indexer`, so a restart replays from disk and asks the node only for new blocks.
+The first start replays every block since the collection began and checks every proof. It prints its progress. Blocks it has read are kept in `.cache-indexer`, and so is a saved copy of the state (a checkpoint, see [Restarts](#restarts)), so a restart loads that, replays only the blocks after it, and asks the node only for new blocks.
 
 When it says `synced`, it is serving on port 5021:
 
@@ -85,7 +85,21 @@ BITCOIN_RPC=… COLLECTION=shielded-nakas node indexer/indexer.mjs --once
 
 ## Running it as a service
 
-`npm start` runs the indexer. It reads `PORT` from the environment, answers `/health` as soon as the process is up (and `503 still syncing` on the other routes until the first replay finishes), and keeps its block cache in `CACHE_DIR`. On a host that gives you a persistent disk, point `CACHE_DIR` at it so a restart replays from disk instead of asking the node for every block again. Behind a reverse proxy, set `TRUST_PROXY` to the number of proxy hops so request limits see the real caller.
+`npm start` runs the indexer. It reads `PORT` from the environment, answers `/health` as soon as the process is up (and `503 still syncing` on the other routes until the first replay finishes), and keeps its block cache and its checkpoints in `CACHE_DIR`. On a host that gives you a persistent disk, point `CACHE_DIR` at it so a restart loads the last checkpoint instead of replaying, and reads blocks from disk instead of asking the node again. Behind a reverse proxy, set `TRUST_PROXY` to the number of proxy hops so request limits see the real caller.
+
+When the host stops the service it sends `SIGTERM`. The indexer then starts no new sync round, finishes the block it is applying, saves a checkpoint of every collection at its last block, and exits with code 0. A stop that does not wait for that loses nothing either: the next start uses the newest checkpoint already on disk.
+
+## Restarts
+
+A checkpoint is a sealed copy of one collection's whole state after a block: every note, spent tag, listing (with the block each was listed in), minted piece, the root of the note tree after every block since the start block, and the indexer's log of every accepted and refused transaction. It is written to `CACHE_DIR/checkpoints/<network>/<cid>/<block>-<block hash>.json.gz`, about 2 MB for Shielded Nakas.
+
+- **When.** At the tip, after every block whose height is a multiple of `CHECKPOINT_EVERY` (6, about an hour); every 144 blocks during a long replay, so an interrupted first sync carries on from there; and on `SIGTERM`. The newest `CHECKPOINT_KEEP` (4) are kept per collection.
+- **On start.** The newest checkpoint is checked before it is used: it must come from the same rules, verification key, start block, network and engine (a hash of the rule code in `src/v1/` and the versions of the libraries it uses); its seal must match its content; the note tree is rebuilt from the notes and must give every saved root; the state digest and the listing locks must agree; and its block must still be in the best chain. If any check fails, the indexer says why and tries the next older one, then falls back to a full replay. Then it replays only the blocks after it.
+- **After a release.** A release that changes the rule code (anything in `src/v1/`) or a library version makes the old checkpoints unusable, and the first start replays every block once (about a minute for Shielded Nakas from a local block cache). A release that changes only the API (`indexer/`) restarts in seconds.
+- **After a chain reorganisation.** The indexer goes back to the newest checkpoint whose block is still in the best chain, replays the new blocks next to the state it is serving, and swaps at the tip. The API keeps answering from the old state until then; no route returns `503`.
+- **Block hashes.** `CACHE_DIR/<network>-hashes.json` keeps the hash of every block read, each entry linked to the one before it. A restart checks the last few against the node or API (about 2 requests) instead of asking for every block's hash again.
+
+Deleting `CACHE_DIR/checkpoints` is always safe: the next start replays from the start block. `CHECKPOINTS=0` turns checkpoints off.
 
 ## Settings
 
@@ -99,9 +113,13 @@ BITCOIN_RPC=… COLLECTION=shielded-nakas node indexer/indexer.mjs --once
 | `START_HEIGHT` | Any other collection: the block to start from, at or before the parent's block | none |
 | `RULES_BLOCK` | Any other collection: hash of the block holding the parent. A node without `txindex` needs it | none |
 | `FOLLOW_ALL` | `0` follows only the collection given above. By default every shielded collection found on Bitcoin is followed too, each with its own copy of the rules engine, all sharing the block cache | `1` |
+| `FOLLOW_MINTED_ONLY` | A collection found on Bitcoin is followed from its first valid mint on. Its replay still starts at its parent's block, so its state is the same, and a parent that never mints costs nothing. `0` follows every parent as soon as it is seen | `1` |
+| `CHECKPOINTS` | `0` turns checkpoints off (every start replays from the start block) | `1` |
+| `CHECKPOINT_EVERY` | At the tip, a checkpoint after every block whose height is a multiple of this | `6` |
+| `CHECKPOINT_KEEP` | Checkpoints kept per collection | `4` |
 | `NETWORK` | `mainnet` or `signet` | `mainnet` |
 | `PORT` | Port the read API listens on | `5021` |
-| `CACHE_DIR` | Where read blocks are kept | `.cache-indexer` |
+| `CACHE_DIR` | Where read blocks, block hashes and checkpoints are kept | `.cache-indexer` |
 | `STOP_HEIGHT` | Sync no further than this block, as if it were the tip: for a replay that must stay inside the blocks already in `CACHE_DIR`, or a test. Leave it unset on an indexer that serves others | none |
 
 Give either `BITCOIN_RPC` or `CHAIN_API`. Give either `COLLECTION` or the `RULES_INSCRIPTION_ID` and `START_HEIGHT` pair.
@@ -112,22 +130,23 @@ Every route is a `GET` and answers JSON.
 
 | Route | Answers |
 |---|---|
-| `/status` | Network, collection, last block applied and its hash, note count, state digest |
+| `/status` | Network, collection, last block applied and its hash, note count, state digest, newest checkpoint |
 | `/state` | The full public state: notes, spent tags, listings, recent tree roots, minted pieces. `?since=<note count>` returns only the notes after that many |
 | `/listings` | Active listings: piece, price, sale fee, credits |
 | `/collection` | The collection's rules, minted count, global number range |
 | `/registry` | Every shielded collection found on Bitcoin, with its global number range |
-| `/collections` | Every collection this indexer follows, with each one's last block, note count and digest |
+| `/collections` | Every collection this indexer follows, with each one's last block, note count and digest; a collection found on Bitcoin that has not minted yet is listed with `"followed": false` |
 | `/c/<cid>/…` | `/status`, `/state`, `/listings`, `/collection` for one collection by its cid |
 
 Field-by-field descriptions are in [API.md](API.md).
 
 ## What the indexer checks for itself
 
-- Every block is the block that was asked for (its header hashes to the requested hash) and its transactions match the header.
+- Every block is the block that was asked for (its header hashes to the requested hash), its transactions match the header, its hash meets the proof-of-work target in its header, and it builds on the block applied before it. On mainnet that target must also be no easier than 1,024 times the target of block 969342, so made-up blocks would need real mining work.
 - The collection's rules come out of the parent inscription's own transaction.
 - The proof verification key in `zk/spend_vkey.json` is the one the collection is pinned to. Any other key is refused at start.
-- A block is applied only if it directly follows the last one. After a chain reorganisation the state is rebuilt from the start block.
+- A block is applied only if it directly follows the last one. After a chain reorganisation the state is rebuilt from the newest checkpoint still in the best chain (or from the start block), next to the state being served.
+- A checkpoint is used only after the checks in [Restarts](#restarts).
 
 What it takes from your node on trust: which chain is the best chain. That is your node's job, and the reason to run your own.
 
@@ -140,3 +159,4 @@ What it takes from your node on trust: which chain is the best chain. That is yo
 | `can't read the parent tx … from the node` | An unknown collection on a node without `txindex`. Set `RULES_BLOCK` |
 | `HTTP 401` | Wrong RPC user, password or cookie path |
 | `still syncing` from the API | The first replay has not reached the tip yet |
+| `checkpoint … not used: …` | That saved state failed a check (the reason follows); an older one or a full replay is used instead. After a release that changed the rule code, `another engine` is expected once |

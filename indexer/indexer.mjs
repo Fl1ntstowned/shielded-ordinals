@@ -20,6 +20,14 @@
 //                                                       sync, then say whether that indexer agrees
 //   [STOP_HEIGHT=<block>]                               sync no further than that block (replays, tests)
 //
+// Restarts (src/v1/checkpoint.mjs): each collection's state is saved in CACHE_DIR/checkpoints, so a
+// restart loads it and replays only the newer blocks. A reorg rolls back to one, serving the old state
+// until the new one is at the tip. SIGTERM finishes the block in hand, saves, and exits.
+//   [CHECKPOINTS=0]  off (default on)   [CHECKPOINT_EVERY=6]  at the tip, every this many blocks
+//   [CHECKPOINT_KEEP=4]  kept per collection
+// Block hashes are kept in CACHE_DIR/<network>-hashes.json (chainview.mjs), so a restart asks the chain
+// source about 2 questions instead of one per block.
+//
 // GET /status      { network, collection, lastHeight, blockHash, notes, digest }   digest = sha256 of the state
 // GET /state       the public state a vault scans (?since=<note count> for only the newer notes)
 // GET /listings    active listings
@@ -34,7 +42,9 @@
 // Every shielded collection found on Bitcoin (the registry sees each parent inscription) gets its
 // own copy of the rules engine, replayed from its parent's block, all sharing one block cache. The
 // routes without /c/<cid>/ answer for the collection given with COLLECTION / RULES_INSCRIPTION_ID.
-// FOLLOW_ALL=0 follows that one collection only.
+// FOLLOW_ALL=0 follows that one collection only. A found collection is followed from its first valid
+// mint on (FOLLOW_MINTED_ONLY=0: as soon as its parent is seen); it still replays from its parent's
+// block, so its state is the same either way, and a parent that never mints costs nothing.
 //
 // Serving other people (optional): API keys and request limits, see indexer/keys.mjs
 //   API_KEYS_FILE=api-keys.json  [API_KEY_REQUIRED=1]  [PUBLIC_LIMIT=30]  [TRUST_PROXY=<proxy hops>]
@@ -44,9 +54,10 @@
 //   [ADMIN_SECRET=<long secret>]   turns on key management over HTTP (POST/GET /admin/keys)
 import http from 'node:http';
 import fs from 'node:fs';
+import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { follower, registryFollower, loadRulesInfo, makeSource, defaultApi } from '../src/v1/follow.mjs';
+import { follower, registryFollower, loadRulesInfo, makeSource, defaultApi, CHECKPOINT_EVERY, CHECKPOINT_KEEP } from '../src/v1/follow.mjs';
 import { exportState } from '../src/v1/view.mjs';
 import { saleFee, vkeyHash, collectionId } from '../src/v1/rules.mjs';
 import { REGISTRY_START } from '../src/v1/registry.mjs';
@@ -54,6 +65,7 @@ import { knownCollection, COLLECTIONS } from '../src/v1/collections.mjs';
 import { makeGate, Limiter, callerAddress } from './keys.mjs';
 import { costOf, OPEN, etagOf, versionAt, hashTail, notModified, parseSince, makeAnswers, sendAnswer } from './serve.mjs';
 import { compare } from './compare.mjs';
+import { chainView } from './chainview.mjs';
 import routeModules from './routes/index.mjs';
 
 const env = (k, d) => { const v = process.env[k]?.trim(); if (v) return v; if (d !== undefined) return d; throw new Error(`missing ${k}`); };
@@ -81,31 +93,29 @@ const RULES_BLOCK = known?.rulesBlock ?? (process.env.RULES_BLOCK?.trim() || nul
 const VKEY = JSON.parse(fs.readFileSync(fileURLToPath(new URL('../zk/spend_vkey.json', import.meta.url)), 'utf8'));
 if (known?.spendVkeyHash && vkeyHash(VKEY) !== known.spendVkeyHash) throw new Error(`zk/spend_vkey.json is not the verification key of "${name}"`);
 
-// the rules, and their text exactly as inscribed (or as written in RULES_FILE): /collection serves it
+// The rules, and their text exactly as inscribed (or as written in RULES_FILE): /collection serves
+// that text, and its sha256 is in every checkpoint.
 const { rules, text: rulesText } = await loadRulesInfo({ source, rulesInscriptionId: RULES_ID, rulesFile: process.env.RULES_FILE, rulesBlock: RULES_BLOCK, withHeight: false });
 
-// One view of the chain per sync round, shared by every follower (the registry included): the tip and
-// the last NEAR hashes are asked once per round (follow.mjs re-checks those for a reorg), deeper hashes
-// once per process. So a restart asks each block's hash once, not once per follower, a collection
-// found later replays from its parent's block without asking again, and in one round every follower
-// stands on the same chain.
-const NEAR = 7;
 // STOP_HEIGHT=<block>: sync no further than that block, as if it were the tip (a replay that must stay
 // inside a block cache, a test). Unset: the chain's tip.
 const STOP = process.env.STOP_HEIGHT?.trim() ? Number(process.env.STOP_HEIGHT.trim()) : null;
 if (STOP !== null && !(Number.isSafeInteger(STOP) && STOP >= 0)) throw new Error('STOP_HEIGHT must be a block height');
-const view = { tip: null, tipP: null, near: new Map(), deep: new Map() };
-const shared = {
-  ...source,
-  tipHeight: () => (view.tipP ??= source.tipHeight().then((t) => (view.tip = STOP === null ? t : Math.min(t, STOP))).catch((e) => { view.tipP = null; throw e; })),
-  hashAt(h) {
-    // the promise is kept, so two followers asking for the same block at once make one request
-    const memo = view.tip !== null && h <= view.tip - NEAR ? view.deep : view.near;
-    if (!memo.has(h)) memo.set(h, source.hashAt(h).catch((e) => { memo.delete(h); throw e; }));
-    return memo.get(h);
-  },
-};
-const newRound = () => { view.tip = null; view.tipP = null; view.near.clear(); };
+const regStart = process.env.REGISTRY_START ? Number(process.env.REGISTRY_START) : REGISTRY_START[NETWORK];
+// One view of the chain, shared by every follower (the registry included), backed by a persistent
+// linked index of block hashes (chainview.mjs). Once per sync round it checks the index's top against
+// the chain source (on a start, the last 12) and adds the new blocks in batches of 10; every other
+// question is answered from memory. So a restart asks the source about 2 questions instead of one per
+// block, a collection found later replays from its parent's block without asking again, and in one
+// round every follower stands on the same chain.
+const shared = chainView({ source, file: path.join(CACHE, `${NETWORK}-hashes.json`), base: Math.min(regStart ?? START, START), stop: STOP });
+const newRound = () => shared.newRound();
+
+// Checkpoints (src/v1/checkpoint.mjs): on unless CHECKPOINTS=0.
+const CHECKPOINTS = env('CHECKPOINTS', '1') !== '0';
+const EVERY = Number(env('CHECKPOINT_EVERY', String(CHECKPOINT_EVERY)));
+const KEEP = Number(env('CHECKPOINT_KEEP', String(CHECKPOINT_KEEP)));
+if (!(Number.isSafeInteger(EVERY) && EVERY >= 1) || !(Number.isSafeInteger(KEEP) && KEEP >= 1)) throw new Error('CHECKPOINT_EVERY and CHECKPOINT_KEEP must be whole numbers, 1 or more');
 
 // One rules engine per collection. Every follower shares the block cache (a cached block is the same
 // whichever collection reads it), so the second collection costs no extra downloads.
@@ -117,7 +127,8 @@ const follow = (id, r, start, text = null) => {
   const entry = {
     cid, id, rules: r, start, skipped: null, text,
     chain: follower({
-      network: NETWORK, source: shared, cacheDir: CACHE, rulesInscriptionId: id, rules: r, vkey: VKEY, startHeight: start,
+      network: NETWORK, source: shared, cacheDir: CACHE, rulesInscriptionId: id, rules: r, rulesText: text, vkey: VKEY, startHeight: start,
+      checkpoints: CHECKPOINTS, checkpointEvery: EVERY, checkpointKeep: KEEP,
       onProgress: (h, tip) => { if (h === tip || Date.now() - shown > 15_000) { shown = Date.now(); console.error(`  ${r.name}: replayed to ${h} / ${tip}`); } },
     }),
   };
@@ -126,10 +137,13 @@ const follow = (id, r, start, text = null) => {
 };
 const primary = follow(RULES_ID, rules, START, rulesText);
 const chain = primary.chain;
-const regStart = process.env.REGISTRY_START ? Number(process.env.REGISTRY_START) : REGISTRY_START[NETWORK];
 const registry = registryFollower({ network: NETWORK, source: shared, cacheDir: CACHE, startHeight: regStart });
 const FOLLOW_ALL = process.env.FOLLOW_ALL !== '0';
+// OWNER DECISION (default on): a found collection is followed once it has a global range (its first
+// valid mint). Its replay still starts at its parent's block, so the state is the same.
+const MINTED_ONLY = env('FOLLOW_MINTED_ONLY', '1') !== '0';
 const ourVkey = vkeyHash(VKEY);
+const hasMinted = (c) => !!c.range;
 
 // Collections the registry found on chain that we are not following yet; returns the new ones.
 function discover() {
@@ -142,21 +156,27 @@ function discover() {
       console.error(`found "${c.rules.name}" (${c.id}); not followed: it pinned another verification key`);
       continue;
     }
+    if (MINTED_ONLY && !hasMinted(c)) continue; // listed in /collections with followed: false
     console.error(`found "${c.rules.name}" (${c.id}) at block ${c.height}; following it`);
     found.push(follow(c.id, c.rules, c.height, c.text ?? null)); // the registry keeps the parent's text
   }
   return found;
 }
 let syncing = null;
+let stopping = false; // SIGTERM
+let timer = null; // the 20 s sync rounds
 // The registry and the primary together (they read the same blocks, so a block missing from the cache
 // is downloaded once), then any collection the registry just found, then the others. A new collection
 // replays from its parent's block inside the running server: no restart.
-const syncAll = () => (syncing ??= (async () => {
+const syncAll = () => (stopping ? Promise.resolve() : (syncing ??= (async () => {
   newRound();
   await Promise.all([registry.sync(), primary.chain.sync()]);
+  // after SIGTERM no new follower: its first replay would hold the shutdown (and every save) past the host's grace period
+  if (stopping) return;
   discover();
   for (const c of collections.values()) if (c.chain && c !== primary) await c.chain.sync();
-})().finally(() => { syncing = null; }));
+})().finally(() => { syncing = null; })));
+const followed = () => [...collections.values()].filter((c) => c.chain);
 const byPath = (pathname) => {
   // /c/<cid>/... -> that collection; anything else -> the primary
   const m = /^\/c\/([0-9a-f]{16})(\/.*)?$/.exec(pathname);
@@ -176,6 +196,7 @@ const statusOf = (col, ix) => ({
   network: NETWORK, collection: col.rules.name, rulesInscriptionId: col.id, cid: col.cid, lastHeight: ix.lastHeight, blockHash: col.chain.hashAt(ix.lastHeight),
   notes: ix.notes.length, digest: digestOf(ix), software: 'shielded-ordinals indexer',
   ...(col === primary ? { collections: collections.size } : {}),
+  checkpoint: col.chain.checkpointInfo(), // the newest saved state: { height } or null
 });
 const collectionsList = () => [...collections.values()].map((c) => {
   const ix = c.chain?.ix() ?? null;
@@ -185,7 +206,11 @@ const collectionsList = () => [...collections.values()].map((c) => {
     lastHeight: ix?.lastHeight ?? null, notes: ix?.notes.length ?? null, digest: ix ? digestOf(ix) : null,
     ...(c.skipped ? { skipped: c.skipped } : {}), ...(c === primary ? { primary: true } : {}),
   };
-});
+}).concat(!FOLLOW_ALL ? [] : [...(registry.registry()?.collections ?? [])].filter(([cid]) => !collections.has(cid)).map(([cid, c]) => ({
+  // found on chain, not followed until its first valid mint (FOLLOW_MINTED_ONLY)
+  cid, parent: c.id, name: c.rules.name, kind: c.rules.kind === 'rune' ? 'rune' : 'collection', supply: c.rules.supply, startBlock: c.height, range: c.range ?? null,
+  lastHeight: null, notes: null, digest: null, followed: false,
+})));
 
 // Per-collection routes: (collection, its engine, query). Global ones ignore the first two.
 const routes = {
@@ -231,15 +256,17 @@ const primaryStatus = () => {
 console.error(`shielded indexer for "${rules.name}" (${NETWORK}), blocks from ${source.label}, from block ${START}${STOP === null ? '' : `, stopping at block ${STOP} (STOP_HEIGHT)`}`);
 if (flag('once') || opt('compare')) {
   await syncAll();
+  // checkpoints still being written are finished first (a file cut short would only be skipped later)
+  const exit = async (code) => { await Promise.all(followed().map((c) => c.chain.flush())); process.exit(code); };
   const ix = chain.ix();
-  if (!ix) { console.error('sync did not finish; run it again (blocks already read are kept)'); process.exit(2); }
+  if (!ix) { console.error('sync did not finish; run it again (blocks already read are kept)'); await exit(2); }
   console.log(JSON.stringify(statusOf(primary, ix)));
   if (collections.size > 1) console.log(JSON.stringify(collectionsList()));
   const behind = [...collections.values()].filter((c) => c.chain && c.chain.ix()?.lastHeight !== ix.lastHeight);
-  if (behind.length) { console.error(`${behind.length} collection(s) did not finish syncing: ${behind.map((c) => c.rules.name).join(', ')}; run it again`); process.exit(2); }
+  if (behind.length) { console.error(`${behind.length} collection(s) did not finish syncing: ${behind.map((c) => c.rules.name).join(', ')}; run it again`); await exit(2); }
   // without the registry no other collection can be found: a pass that lost it has not followed them all
-  if (FOLLOW_ALL && registry.registry()?.lastHeight !== ix.lastHeight) { console.error('the registry did not finish syncing, so other collections may be missing; run it again'); process.exit(2); }
-  process.exit(opt('compare') ? await compare({ url: opt('compare'), sync: syncAll, status: primaryStatus }) : 0);
+  if (FOLLOW_ALL && registry.registry()?.lastHeight !== ix.lastHeight) { console.error('the registry did not finish syncing, so other collections may be missing; run it again'); await exit(2); }
+  await exit(opt('compare') ? await compare({ url: opt('compare'), sync: syncAll, status: primaryStatus }) : 0);
 }
 
 // Serving other people: API keys and request limits (indexer/keys.mjs). Off unless API_KEYS_FILE is set.
@@ -411,7 +438,24 @@ http.createServer(async (req, res) => {
 }).listen(PORT, async () => {
   console.error(`listening on :${PORT}`);
   await syncAll();
+  if (stopping) return;
   const ix = chain.ix();
-  console.error(`synced to ${ix?.lastHeight}; state digest ${ix ? digestOf(ix).slice(0, 16) : '-'}…; following ${[...collections.values()].filter((c) => c.chain).length} collection(s)`);
-  setInterval(syncAll, 20_000).unref();
+  console.error(`synced to ${ix?.lastHeight}; state digest ${ix ? digestOf(ix).slice(0, 16) : '-'}…; following ${followed().length} collection(s)`);
+  timer = setInterval(syncAll, 20_000);
+  timer.unref();
+});
+
+// SIGTERM (a host stopping or redeploying the service): no new round, the running one stops after the
+// block in hand, then every followed collection saves a checkpoint at its last block, and the process
+// exits 0. The next start loads those and replays nothing it already did.
+process.on('SIGTERM', async () => {
+  if (stopping) return;
+  stopping = true;
+  console.error('SIGTERM: finishing the block in hand, then saving every collection');
+  if (timer) clearInterval(timer);
+  await Promise.all([registry.stop(), ...followed().map((c) => c.chain.stop())]);
+  await syncing?.catch(() => {});
+  await Promise.all(followed().map((c) => c.chain.checkpoint()));
+  console.error(`saved: ${followed().map((c) => `${c.rules.name} ${c.chain.checkpointInfo()?.height ?? '-'}`).join(', ')}`);
+  process.exit(0);
 });
