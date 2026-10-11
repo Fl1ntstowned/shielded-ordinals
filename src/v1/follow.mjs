@@ -80,6 +80,7 @@ export function verifiedBlock(raw, hash) {
  *   prevoutScripts(hash, txid)   scriptPubKey of every coin that tx spends ([Buffer | null])
  *   txHex(txid, blockHash) a transaction's raw hex
  *   get                    the raw HTTP getter (esplora only; null on a node)
+ *   rpc                    the raw JSON-RPC caller (a node only; null on esplora)
  */
 export function makeSource({ api, rpc, rpcCookie } = {}) {
   // both followers (collection + registry) ask for the same blocks: download each one once
@@ -100,6 +101,7 @@ export function makeSource({ api, rpc, rpcCookie } = {}) {
       kind: 'node',
       label: 'your Bitcoin node',
       get: null,
+      rpc: call,
       tipHeight: async () => Number(await call('getblockcount')),
       hashAt: (h) => call('getblockhash', h),
       block: (hash) => once('b:' + hash, async () => verifiedBlock(Buffer.from(await call('getblock', hash, 0), 'hex'), hash)),
@@ -126,6 +128,7 @@ export function makeSource({ api, rpc, rpcCookie } = {}) {
     kind: 'api',
     label: base,
     get,
+    rpc: null,
     tipHeight: async () => Number(await get('/blocks/tip/height', 'text')),
     hashAt: async (h) => String(await get(`/block-height/${h}`, 'text')).trim(),
     block: (hash) => once('b:' + hash, async () => verifiedBlock(await get(`/block/${hash}/raw`, 'buf'), hash)),
@@ -142,8 +145,21 @@ const sourceOf = (o) => o.source ?? makeSource({ api: o.api, rpc: o.rpc, rpcCook
  * The collection's rules: from the parent inscription's reveal tx, or a local file (test collections).
  * `rulesBlock` = hash of the block holding the parent; a node without txindex needs it.
  */
-export async function loadRules({ api, rpc, rpcCookie, source, rulesInscriptionId, rulesFile, rulesBlock }) {
-  if (rulesFile) return parseRules(fs.readFileSync(rulesFile, 'utf8'));
+export async function loadRules(opts) {
+  return (await loadRulesInfo({ ...opts, withHeight: false })).rules;
+}
+
+/**
+ * The rules and where they came from: { rules, text (the inscribed JSON as written), txid (the
+ * parent's reveal tx), height (the block holding it, or null when unknown) }.
+ * height: esplora GET /tx/<txid> status.block_height; a node: getblockheader(rulesBlock).height when
+ * rulesBlock is given. A rules file has no height.
+ */
+export async function loadRulesInfo({ api, rpc, rpcCookie, source, rulesInscriptionId, rulesFile, rulesBlock, withHeight = true }) {
+  if (rulesFile) {
+    const text = fs.readFileSync(rulesFile, 'utf8');
+    return { rules: parseRules(text), text, txid: rulesInscriptionId?.split('i')[0] ?? null, height: null };
+  }
   const src = source ?? makeSource({ api, rpc, rpcCookie });
   const txid = rulesInscriptionId.split('i')[0];
   let hex;
@@ -153,7 +169,14 @@ export async function loadRules({ api, rpc, rpcCookie, source, rulesInscriptionI
     if (src.kind === 'node' && !rulesBlock) throw new Error(`can't read the parent tx ${txid} from the node (${e.message}). Give the hash of its block (RULES_BLOCK), or run the node with txindex=1.`);
     throw e;
   }
-  return parseRules(rulesFromChain(hex, rulesInscriptionId).text);
+  const { text } = rulesFromChain(hex, rulesInscriptionId);
+  const rules = parseRules(text);
+  let height = null;
+  if (withHeight) {
+    if (src.rpc && rulesBlock) height = Number((await src.rpc('getblockheader', rulesBlock)).height);
+    else if (src.get) height = (await src.get(`/tx/${txid}`))?.status?.block_height ?? null;
+  }
+  return { rules, text, txid, height };
 }
 
 const revive = (_k, v) => (v && typeof v === 'object' && typeof v.hex === 'string' && Object.keys(v).length === 1 ? Buffer.from(v.hex, 'hex') : v);
@@ -224,10 +247,23 @@ export function registryFollower({ network, api, rpc, rpcCookie, source, cacheDi
     if (work.lastHeight !== null) reg = work;
   }
   const sync = () => (busy ??= syncOnce().catch((e) => console.error('registry sync:', e.message)).finally(() => { busy = null; }));
-  return { sync, registry: () => reg };
+  return {
+    sync, registry: () => reg,
+    /** the hash of a block the registry applied (null for any other height) */
+    hashAt: (h) => hashes.get(h) ?? null,
+  };
 }
 
-export function follower({ network, api, rpc, rpcCookie, source, cacheDir, rulesInscriptionId, rules, vkey, startHeight, onProgress }) {
+/**
+ * Follow one collection: replay its rules engine (indexer.mjs) from startHeight, block by block.
+ * `hooks` (optional): side indexes that read the same blocks without ever changing the engine.
+ *   beforeBlock(h, hash, txs, src)  awaited before block h is applied (txs = the cached reduced block).
+ *                                   Throwing aborts the round before block h, like a failed fetch.
+ *   afterBlock(h, ix)               called synchronously right after block h is applied
+ *   reset()                         a new engine starts from startHeight (first sync, or after a reorg)
+ *   snapshot() -> JSON, restore(json)   optional, for saved state
+ */
+export function follower({ network, api, rpc, rpcCookie, source, cacheDir, rulesInscriptionId, rules, vkey, startHeight, onProgress, hooks = [] }) {
   const src = sourceOf({ api, rpc, rpcCookie, source });
   const NET = networkOf(network);
   const dir = path.resolve(cacheDir, network);
@@ -262,10 +298,17 @@ export function follower({ network, api, rpc, rpcCookie, source, cacheDir, rules
   async function syncOnce() {
     tip = await src.tipHeight();
     if (ix && !(await stillOnChain(src, hashes, ix.lastHeight, startHeight))) { console.warn(`reorg near ${ix.lastHeight}: rebuilding`); ix = null; hashes = new Map(); }
-    const work = ix ?? new Indexer({ rulesInscriptionId, rules, network: NET, vkey });
+    let work = ix;
+    if (!work) {
+      work = new Indexer({ rulesInscriptionId, rules, network: NET, vkey });
+      for (const k of hooks) k.reset?.();
+    }
     for (let h = ix ? ix.lastHeight + 1 : startHeight; h <= tip; h++) {
       const hash = await src.hashAt(h);
-      await work.applyBlock(h, await fetchBlock(h, hash));
+      const txs = await fetchBlock(h, hash);
+      for (const k of hooks) await k.beforeBlock?.(h, hash, txs, src);
+      await work.applyBlock(h, txs);
+      for (const k of hooks) k.afterBlock?.(h, work);
       hashes.set(h, hash);
       if (!ix && onProgress) onProgress(h, tip);
     }
@@ -274,7 +317,7 @@ export function follower({ network, api, rpc, rpcCookie, source, cacheDir, rules
   const sync = () => (busy ??= syncOnce().catch((e) => console.error('sync:', e.message)).finally(() => { busy = null; }));
 
   return {
-    get: src.get, NET, sync, source: src,
+    get: src.get, NET, sync, source: src, hooks,
     ix: () => ix,
     tip: () => tip,
     /** the hash of a block this indexer applied */
