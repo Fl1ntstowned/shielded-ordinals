@@ -169,6 +169,8 @@ let timer = null; // the 20 s sync rounds
 const syncAll = () => (stopping ? Promise.resolve() : (syncing ??= (async () => {
   newRound();
   await Promise.all([registry.sync(), primary.chain.sync()]);
+  // after SIGTERM no new follower: its first replay would hold the shutdown (and every save) past the host's grace period
+  if (stopping) return;
   discover();
   for (const c of collections.values()) if (c.chain && c !== primary) await c.chain.sync();
 })().finally(() => { syncing = null; })));
