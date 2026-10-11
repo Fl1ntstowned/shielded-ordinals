@@ -39,7 +39,6 @@
 //   a 304 for an unchanged answer. /state costs 20 units (5 with ?since=), everything else 1.
 //   [ADMIN_SECRET=<long secret>]   turns on key management over HTTP (POST/GET /admin/keys)
 import http from 'node:http';
-import zlib from 'node:zlib';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -49,6 +48,8 @@ import { saleFee, vkeyHash, collectionId } from '../src/v1/rules.mjs';
 import { REGISTRY_START } from '../src/v1/registry.mjs';
 import { knownCollection, COLLECTIONS } from '../src/v1/collections.mjs';
 import { makeGate, Limiter, callerAddress } from './keys.mjs';
+import { costOf, OPEN, etagOf, makeAnswers, sendAnswer } from './serve.mjs';
+import { compare } from './compare.mjs';
 
 const env = (k, d) => { const v = process.env[k]?.trim(); if (v) return v; if (d !== undefined) return d; throw new Error(`missing ${k}`); };
 const args = process.argv.slice(2);
@@ -196,31 +197,12 @@ const globalVersion = (path) => {
   return `${regH}.${crypto.createHash('sha256').update(all).digest('hex').slice(0, 8)}`;
 };
 
-// Does another indexer hold the same state? Both must be at the same block, so a block that lands
-// between the two reads is settled by syncing again.
-async function compare(url) {
-  for (let round = 0; round < 6; round++) {
-    await syncAll();
-    const ix = chain.ix();
-    if (!ix) throw new Error('not synced');
-    const r = await fetch(url);
-    const theirs = await r.json().catch(() => null);
-    if (!theirs?.digest || typeof theirs.lastHeight !== 'number') { console.log('that address did not answer with an indexer status'); return 2; }
-    const mine = statusOf(primary, ix);
-    if (theirs.lastHeight !== mine.lastHeight) {
-      console.log(`different heights (${mine.lastHeight} here, ${theirs.lastHeight} there): trying again`);
-      await new Promise((ok) => setTimeout(ok, 20_000));
-      continue;
-    }
-    console.log(`here   ${mine.lastHeight}  notes ${mine.notes}  ${mine.digest}`);
-    console.log(`there  ${theirs.lastHeight}  notes ${theirs.notes}  ${theirs.digest}`);
-    if (theirs.digest === mine.digest) { console.log('AGREE: the same state at the same block'); return 0; }
-    console.log('DISAGREE: the two indexers hold different state at the same block');
-    return 1;
-  }
-  console.log('the two indexers never stood at the same block; run it again');
-  return 2;
-}
+// --compare (compare.mjs): the primary's status, as /status answers it
+const primaryStatus = () => {
+  const ix = chain.ix();
+  if (!ix) throw new Error('not synced');
+  return statusOf(primary, ix);
+};
 
 console.error(`shielded indexer for "${rules.name}" (${NETWORK}), blocks from ${source.label}, from block ${START}`);
 if (flag('once') || opt('compare')) {
@@ -233,7 +215,7 @@ if (flag('once') || opt('compare')) {
   if (behind.length) { console.error(`${behind.length} collection(s) did not finish syncing: ${behind.map((c) => c.rules.name).join(', ')}; run it again`); process.exit(2); }
   // without the registry no other collection can be found: a pass that lost it has not followed them all
   if (FOLLOW_ALL && registry.registry()?.lastHeight !== ix.lastHeight) { console.error('the registry did not finish syncing, so other collections may be missing; run it again'); process.exit(2); }
-  process.exit(opt('compare') ? await compare(opt('compare')) : 0);
+  process.exit(opt('compare') ? await compare({ url: opt('compare'), sync: syncAll, status: primaryStatus }) : 0);
 }
 
 // Serving other people: API keys and request limits (indexer/keys.mjs). Off unless API_KEYS_FILE is set.
@@ -292,27 +274,8 @@ const nameRoute = (p) => {
   return rec ? { code: 200, body: { name: rec.name, address: rec.to, id: rec.id, height: rec.height } } : { code: 404, body: { error: 'nobody has that name' } };
 };
 
-// What a request costs in units (keys.mjs): the full state is the one heavy answer.
-const costOf = (path, since) => (path === '/state' ? (since > 0 ? 5 : 20) : 1);
-// Routes anyone may read even when keys are required: tiny, and what a wallet needs to find us.
-const OPEN = new Set(['/status', '/collections']);
-
-// Every answer is built once per block (the state only changes when a block lands) and kept
-// compressed, so a thousand readers cost one build. ETag = block + route, so a client that asks
-// again with If-None-Match gets a 304 and no bytes.
-const built = new Map(); // key -> { height, json, gz, etag }
-const etagOf = (key, height) => `"${height}-${crypto.createHash('sha256').update(key).digest('hex').slice(0, 12)}"`;
-const answer = (key, height, build) => {
-  const hit = built.get(key);
-  if (hit && hit.height === height) return hit;
-  if (built.size > 200) for (const k of built.keys()) { if (!k.startsWith('/status')) built.delete(k); if (built.size <= 100) break; }
-  // partial states are as many as there are `since` values, and each can be nearly the whole state: keep a few
-  if (key.includes('?since=')) { const parts = [...built.keys()].filter((k) => k.includes('?since=')); if (parts.length >= 8) built.delete(parts[0]); }
-  const json = JSON.stringify(build());
-  const a = { height, json, gz: json.length > 1024 ? zlib.gzipSync(json) : null, etag: etagOf(key, height) };
-  built.set(key, a);
-  return a;
-};
+// Every answer is built once per block and kept compressed (serve.mjs); costOf and OPEN price them.
+const { answer } = makeAnswers();
 
 http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://x');
@@ -357,12 +320,7 @@ http.createServer(async (req, res) => {
     const names = isName ? nameRoute(path) : null;
     if (names && names.code !== 200) return send(names.code, names.body); // a miss is not kept: unknown names are endless
     const a = isName ? answer(key, height, () => names.body) : answer(key, height, () => route(col, ix, new URLSearchParams(since ? { since: String(since) } : {})));
-    const code = 200;
-    const head = { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base() };
-    if (unchanged && code === 200) { res.writeHead(304, head); return res.end(); }
-    if (a.gz && /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) { res.writeHead(code, { ...head, 'content-encoding': 'gzip' }); return res.end(a.gz); }
-    res.writeHead(code, head);
-    res.end(a.json);
+    sendAnswer(req, res, a, { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base() });
   } catch (e) { send(500, { error: e.message }); }
 }).listen(PORT, async () => {
   console.error(`listening on :${PORT}`);
