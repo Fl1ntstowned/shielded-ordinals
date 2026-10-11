@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node indexer/indexer.mjs",
-    "test": "node test/api-keys.mjs && node test/node-source.mjs",
+    "test": "node test/run.mjs",
     "test:node": "node test/node-source.mjs",
     "test:keys": "node test/api-keys.mjs"
   },
