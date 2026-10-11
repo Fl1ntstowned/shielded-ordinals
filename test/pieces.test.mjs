@@ -104,9 +104,18 @@ const fixHex = (txid) => fs.readFileSync(path.join(FIX, `${txid}.hex`), 'utf8').
   check('tolerant reader: 3 children, the middle with unreadable tag-5 CBOR: 3 envelopes, the middle flagged, the others whole', mine.length === 3 && mine[1].metadataError === 'unreadable' && mine[1].metadata === null && mine[1].sha256 === sha('middle')
     && mine[0].shielded?.piece === 1 && mine[2].shielded?.piece === 2 && mine.every((e, i) => e.id === `${t.txid}i${i}`), mine);
   check('tolerant reader: the release reader loses all three (why the index has its own)', readInscriptions(t.tx.toHex()).length === 0);
+  // a parent tag written with the fixed 4-byte index (36 bytes, i0 = 00000000) still names the parent, as in ord
+  const fixedParent = { tags: { contentType: 'image/png', metadata: { shielded: { piece: 3 } }, unknown: [[new Uint8Array([3]), new Uint8Array([...Buffer.from('aa'.repeat(32), 'hex'), 0, 0, 0, 0])]] }, body: Buffer.from('fixed') };
+  const tf = revealTx(c, [{ txid: 'aa'.repeat(32), vout: 0 }], [fixedParent]);
+  const fx = readChildren(tf.tx.toHex());
+  check('reader: a 36-byte parent tag with a zero 4-byte index names <txid>i0', fx.length === 1 && same(fx[0].parents, [PID]) && fx[0].shielded?.piece === 3, fx);
   const txid = Buffer.from('ab'.repeat(32), 'hex');
   check('parent field: 32 bytes is i0, 33 bytes names i1..i255, a trailing zero byte is refused (as ord)', inscriptionIdField(txid) === `${'ab'.repeat(32)}i0` && inscriptionIdField(Buffer.concat([txid, Buffer.from([7])])) === `${'ab'.repeat(32)}i7`
-    && inscriptionIdField(Buffer.concat([txid, Buffer.from([0])])) === null && inscriptionIdField(Buffer.concat([txid, Buffer.from([1, 1])])) === `${'ab'.repeat(32)}i257` && inscriptionIdField(txid.subarray(1)) === null && inscriptionIdField(Buffer.alloc(37)) === null);
+    && inscriptionIdField(Buffer.concat([txid, Buffer.from([0])])) === null && inscriptionIdField(Buffer.concat([txid, Buffer.from([1, 1])])) === `${'ab'.repeat(32)}i257` && inscriptionIdField(txid.subarray(1)) === null && inscriptionIdField(Buffer.alloc(37)) === null
+    && inscriptionIdField(Buffer.concat([txid, Buffer.from([1, 1, 0])])) === null);
+  check('parent field: the fixed 4-byte index may end in zero bytes (ord InscriptionId::from_value): 00000000 is i0, 07000000 is i7',
+    inscriptionIdField(Buffer.concat([txid, Buffer.from([0, 0, 0, 0])])) === `${'ab'.repeat(32)}i0` && inscriptionIdField(Buffer.concat([txid, Buffer.from([7, 0, 0, 0])])) === `${'ab'.repeat(32)}i7`
+    && inscriptionIdField(Buffer.concat([txid, Buffer.from([1, 1, 0, 0])])) === `${'ab'.repeat(32)}i257`);
   const env = Buffer.from('0063036f72640101510068', 'hex'); // OP_0 OP_IF "ord" 01 01(tag 1 = 'Q') OP_0 OP_ENDIF
   check('script reader: an empty push in any encoding is OP_0; an unknown opcode is an opcode; a push past the end refuses the script', same(scriptOps(Buffer.from('4c00', 'hex')), [0]) && same(scriptOps(Buffer.from('4d0000', 'hex')), [0])
     && same(scriptOps(Buffer.from('bb', 'hex')), ['op187']) && (() => { try { scriptOps(Buffer.from('4c05aa', 'hex')); return false; } catch { return true; } })() && scriptOps(Buffer.concat([env, Buffer.from('bb', 'hex')])).filter((x) => x === 'ENDIF').length === 1);

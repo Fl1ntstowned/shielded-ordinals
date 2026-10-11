@@ -79,12 +79,13 @@ export function scriptOps(script) {
   return out;
 }
 
-/** ord's inscription id field (parent, delegate): 32 bytes of txid, then 0-4 bytes of index, little
- *  endian, with no trailing zero byte (ord refuses that form). null when it is not one. */
+/** ord's inscription id field (parent, delegate; ord InscriptionId::from_value): 32 bytes of txid,
+ *  then 0-4 bytes of index, little endian. A shorter index may not end in a zero byte (ord refuses
+ *  that form); the full 4-byte index may (fixed length, e.g. 00000000 for i0). null when it is not one. */
 export function inscriptionIdField(v) {
   if (!v || v.length < 32 || v.length > 36) return null;
   const idx = v.subarray(32);
-  if (idx.length && idx[idx.length - 1] === 0) return null;
+  if (idx.length && idx.length !== 4 && idx[idx.length - 1] === 0) return null;
   let n = 0;
   for (let k = idx.length - 1; k >= 0; k--) n = n * 256 + idx[k];
   return `${Buffer.from(v.subarray(0, 32)).reverse().toString('hex')}i${n}`;
