@@ -208,9 +208,12 @@ const port = A.port;
   const crg = await get(port, `/c/${Q.cidHex}/registry`);
   check('server: /c/<cid>/registry equals /registry (body and ETag)', rg.status === 200 && crg.headers.etag === rg.headers.etag && crg.body.equals(rg.body) && rg.headers.etag === etagOf(V, '/registry'));
   const forms = [['/state', '/state'], ['/state?since=2', '/state?since=2'], ['/state?since=2&x=1', '/state?since=2'], ['/state?since=0', '/state'], ['/listings', '/listings'], ['/collection', '/collection'],
-    ['/names/info', '/names/info'], ['/names/alice.naka', '/names/alice.naka'], [`/c/${Q.cidHex}/state`, `/c/${Q.cidHex}/state`], [`/c/${Q.cidHex}/listings`, `/c/${Q.cidHex}/listings`]];
+    [`/c/${Q.cidHex}/state`, `/c/${Q.cidHex}/state`], [`/c/${Q.cidHex}/listings`, `/c/${Q.cidHex}/listings`]];
   const tags = await Promise.all(forms.map(([u]) => get(port, u)));
   check('server: ETags follow the formula for every route (version = height + block hash; key = prefix + route + ?since)', tags.every((r, i) => r.status === 200 && r.headers.etag === etagOf(V, forms[i][1])), tags.map((r, i) => [forms[i][0], r.status, r.headers.etag]));
+  // the names (indexer/routes/names.mjs) version is the registry's height plus its block hash tail
+  const nameTags = await Promise.all(['/names/info', '/names/alice.naka'].map((u) => get(port, u)));
+  check('server: names ETags are "<height>-<block hash tail 8>-<sha256(key)[0:12]>"', nameTags.every((r, i) => r.status === 200 && r.headers.etag === etagOf(V, ['/names/info', '/names/alice.naka'][i])), nameTags.map((r) => [r.status, r.headers.etag]));
   const cols = await get(port, '/collections');
   const list = cols.json();
   const all = list.map((c) => (c.lastHeight === null ? `${c.cid}:-` : `${c.cid}:${c.lastHeight}-${chain.hashAt(c.lastHeight).slice(-8)}`)).join(',');

@@ -24,8 +24,9 @@
 // GET /state       the public state a vault scans (?since=<note count> for only the newer notes)
 // GET /listings    active listings
 // GET /registry    every shielded collection + its global number range
-// GET /collection  rules, minted count, this collection's global range
-// GET /names/info, /names/<name>, /names/of/<shielded address>      shielded names
+// GET /collection  rules (as inscribed), minted count, this collection's global range
+// GET /names/info, /names?after=<i>, /names/<name>, /names/of/<shielded address>   shielded names
+//                  (route modules: indexer/routes/names.mjs)
 // GET /collections                 every shielded collection this indexer follows (found on chain)
 // GET /c/<cid>/status|state|listings|collection   the same routes for one collection by its cid
 // More routes come from route modules: indexer/routes/index.mjs
@@ -45,7 +46,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { follower, registryFollower, loadRules, makeSource, defaultApi } from '../src/v1/follow.mjs';
+import { follower, registryFollower, loadRulesInfo, makeSource, defaultApi } from '../src/v1/follow.mjs';
 import { exportState } from '../src/v1/view.mjs';
 import { saleFee, vkeyHash, collectionId } from '../src/v1/rules.mjs';
 import { REGISTRY_START } from '../src/v1/registry.mjs';
@@ -80,8 +81,8 @@ const RULES_BLOCK = known?.rulesBlock ?? (process.env.RULES_BLOCK?.trim() || nul
 const VKEY = JSON.parse(fs.readFileSync(fileURLToPath(new URL('../zk/spend_vkey.json', import.meta.url)), 'utf8'));
 if (known?.spendVkeyHash && vkeyHash(VKEY) !== known.spendVkeyHash) throw new Error(`zk/spend_vkey.json is not the verification key of "${name}"`);
 
-const rulesText = process.env.RULES_FILE ? fs.readFileSync(process.env.RULES_FILE, 'utf8') : null;
-const rules = await loadRules({ source, rulesInscriptionId: RULES_ID, rulesFile: process.env.RULES_FILE, rulesBlock: RULES_BLOCK });
+// the rules, and their text exactly as inscribed (or as written in RULES_FILE): /collection serves it
+const { rules, text: rulesText } = await loadRulesInfo({ source, rulesInscriptionId: RULES_ID, rulesFile: process.env.RULES_FILE, rulesBlock: RULES_BLOCK, withHeight: false });
 
 // One view of the chain per sync round, shared by every follower (the registry included): the tip and
 // the last NEAR hashes are asked once per round (follow.mjs re-checks those for a reorg), deeper hashes
@@ -108,12 +109,13 @@ const newRound = () => { view.tip = null; view.tipP = null; view.near.clear(); }
 
 // One rules engine per collection. Every follower shares the block cache (a cached block is the same
 // whichever collection reads it), so the second collection costs no extra downloads.
-const collections = new Map(); // cid hex -> { cid, id, rules, start, chain, skipped }
-const follow = (id, r, start) => {
+const collections = new Map(); // cid hex -> { cid, id, rules, start, chain, skipped, text }
+// text: the rules exactly as inscribed (null when not known)
+const follow = (id, r, start, text = null) => {
   let shown = 0;
   const cid = collectionId(id).toString('hex');
   const entry = {
-    cid, id, rules: r, start, skipped: null,
+    cid, id, rules: r, start, skipped: null, text,
     chain: follower({
       network: NETWORK, source: shared, cacheDir: CACHE, rulesInscriptionId: id, rules: r, vkey: VKEY, startHeight: start,
       onProgress: (h, tip) => { if (h === tip || Date.now() - shown > 15_000) { shown = Date.now(); console.error(`  ${r.name}: replayed to ${h} / ${tip}`); } },
@@ -122,7 +124,7 @@ const follow = (id, r, start) => {
   collections.set(cid, entry);
   return entry;
 };
-const primary = follow(RULES_ID, rules, START);
+const primary = follow(RULES_ID, rules, START, rulesText);
 const chain = primary.chain;
 const regStart = process.env.REGISTRY_START ? Number(process.env.REGISTRY_START) : REGISTRY_START[NETWORK];
 const registry = registryFollower({ network: NETWORK, source: shared, cacheDir: CACHE, startHeight: regStart });
@@ -141,7 +143,7 @@ function discover() {
       continue;
     }
     console.error(`found "${c.rules.name}" (${c.id}) at block ${c.height}; following it`);
-    found.push(follow(c.id, c.rules, c.height));
+    found.push(follow(c.id, c.rules, c.height, c.text ?? null)); // the registry keeps the parent's text
   }
   return found;
 }
@@ -163,7 +165,13 @@ const byPath = (pathname) => {
 };
 
 export const digestOf = (ix) => crypto.createHash('sha256').update(ix.stateDigest()).digest('hex');
-const rawRules = (col) => (col === primary && rulesText ? JSON.parse(rulesText) : Object.fromEntries(Object.entries(col.rules).filter(([k]) => !/Script$|^fileMint$/.test(k))));
+// /collection's rules: the parent's JSON exactly as inscribed (the payout scripts included). Without
+// the text, the parsed rules minus what the engine adds: the scripts as bytes, fileMint, and the rune
+// fields (runeMode, lotStarts).
+const ENGINE_KEYS = new Set(['fileMint', 'runeMode', 'lotStarts']);
+const rawRules = (col) => (col.text
+  ? JSON.parse(col.text)
+  : Object.fromEntries(Object.entries(col.rules).filter(([k, v]) => !(v instanceof Uint8Array) && !ENGINE_KEYS.has(k)))); // (a Buffer is a Uint8Array)
 const statusOf = (col, ix) => ({
   network: NETWORK, collection: col.rules.name, rulesInscriptionId: col.id, cid: col.cid, lastHeight: ix.lastHeight, blockHash: col.chain.hashAt(ix.lastHeight),
   notes: ix.notes.length, digest: digestOf(ix), software: 'shielded-ordinals indexer',
@@ -210,8 +218,8 @@ const globalVersion = (path) => {
   }).join(',');
   return `${regH}.${crypto.createHash('sha256').update(all).digest('hex').slice(0, 8)}-${hashTail(regHash)}`;
 };
-// The version of a names answer: the registry's block (the names index lives in the registry).
-const namesVersion = (names) => versionAt(names.height, registry.hashAt(names.height));
+// The names answers (indexer/routes/names.mjs) take the registry's block the same way: the names
+// index lives in the registry.
 
 // --compare (compare.mjs): the primary's status, as /status answers it
 const primaryStatus = () => {
@@ -280,15 +288,8 @@ async function admin(req, url, send) {
   return send(404, { error: 'not found' });
 }
 
+// the shielded names (src/v1/names.mjs) are served by route modules: indexer/routes/names.mjs
 const namesOf = () => registry.registry()?.names ?? null;
-const nameRoute = (p) => {
-  const names = namesOf();
-  if (!names) return { code: 503, body: { error: 'still syncing' } };
-  if (p === '/names/info') { const st = names.state(); return { code: 200, body: { ...st, index: st } }; } // index: the shape tools/names-indexer.mjs --compare reads
-  if (p.startsWith('/names/of/')) return { code: 200, body: { names: names.of(decodeURIComponent(p.slice('/names/of/'.length))) } };
-  const rec = names.resolve(decodeURIComponent(p.slice('/names/'.length)).trim().toLowerCase());
-  return rec ? { code: 200, body: { name: rec.name, address: rec.to, id: rec.id, height: rec.height } } : { code: 404, body: { error: 'nobody has that name' } };
-};
 
 // Every answer is built once per version (its block) and compressed once per encoding someone asks
 // for (serve.mjs); costOf and OPEN price them.
@@ -296,12 +297,12 @@ const answers = makeAnswers();
 const { answer } = answers;
 
 // Route modules (indexer/routes/index.mjs, where the contract is written): tried after the built-in
-// routes and the names, in list order.
+// routes, in list order.
 const optional = (v, type) => v === undefined || typeof v === type;
 for (const m of routeModules) {
   if (!m?.id || !['collection', 'global'].includes(m.scope) || !['shared', 'own'].includes(m.keep)
     || typeof m.match !== 'function' || typeof m.parse !== 'function' || typeof m.build !== 'function'
-    || !optional(m.open, 'boolean') || !optional(m.version, 'function') || !optional(m.headers, 'function')
+    || !optional(m.open, 'boolean') || !optional(m.version, 'function') || !optional(m.headers, 'function') || !optional(m.miss, 'function')
     || (m.limit !== undefined && !(m.keep === 'own' && Number.isSafeInteger(m.limit) && m.limit >= 1))) throw new Error(`route module "${m?.id ?? '?'}" does not follow the contract in indexer/routes/index.mjs`);
 }
 // A price that is not a whole number of units would let the call through for free and break the
@@ -352,9 +353,8 @@ http.createServer(async (req, res) => {
     if (url.pathname.startsWith('/admin/')) return gate && ADMIN ? await admin(req, url, send) : send(404, { error: 'not found' });
     const { col, path } = byPath(url.pathname);
     const route = routes[path];
-    const isName = path.startsWith('/names/') && path.length > '/names/'.length;
-    const mod = route || isName ? null : moduleFor(path);
-    if (req.method !== 'GET' || (!route && !isName && !mod)) return send(404, { error: 'not found' });
+    const mod = route ? null : moduleFor(path);
+    if (req.method !== 'GET' || (!route && !mod)) return send(404, { error: 'not found' });
     if (!col) return send(404, { error: 'no such collection here; see /collections' });
     if (mod) {
       // a route module: a collection route answers for the collection named by the prefix (the
@@ -366,7 +366,7 @@ http.createServer(async (req, res) => {
       const ix = c.chain.ix();
       if (!ix) return pass(1, !!m.open) ? send(503, { error: 'still syncing' }) : undefined;
       const q = url.searchParams;
-      const p = m.parse({ params, q, ix, col: c });
+      const p = m.parse({ params, q, ix, col: c, names: namesOf() });
       if ('status' in p) return send(p.status, p.body); // refused before the gate: free
       priced(m, p);
       const reg = registry.registry();
@@ -376,11 +376,13 @@ http.createServer(async (req, res) => {
       const key = (scoped && c !== primary ? `/c/${c.cid}` : '') + p.key;
       const unchanged = notModified(req.headers['if-none-match'], etagOf(key, version));
       if (!pass(unchanged ? 1 : p.cost, !!m.open)) return;
+      const gone = m.miss?.(ctx); // charged (x-cost), never kept (a name nobody holds, an index still syncing)
+      if (gone) return send(gone.status, gone.body);
       const a = cacheOf(m).answer(key, version, () => m.build(ctx));
       return await sendAnswer(req, res, a, { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base(), ...(m.headers?.(ctx) ?? {}) });
     }
-    // names, /registry and /collections are the same answer under any /c/<cid>/ prefix
-    const global = isName || GLOBAL.has(path);
+    // /registry and /collections are the same answer under any /c/<cid>/ prefix
+    const global = GLOBAL.has(path);
     if (col.skipped && !global) return send(409, { error: col.skipped });
     // ?since= of /state: a whole number, or 400 before the gate (free). Anything else used to be
     // served as the full state.
@@ -395,17 +397,12 @@ http.createServer(async (req, res) => {
     // the last note is the same answer (since = the note count).
     const since = parseSince(sinceText, ix.notes.length);
     const key = (global || col === primary ? '' : `/c/${col.cid}`) + path + (since ? `?since=${since}` : '');
-    const namesNow = isName ? namesOf() : null;
-    const version = isName ? (namesNow ? namesVersion(namesNow) : 'syncing')
-      : GLOBAL.has(path) ? globalVersion(path)
-        : versionAt(ix.lastHeight, col.chain.hashAt(ix.lastHeight));
+    const version = global ? globalVersion(path) : versionAt(ix.lastHeight, col.chain.hashAt(ix.lastHeight));
     // The ETag is known before anything is built, so the gate goes first: a refused call never costs
     // a build, and an unchanged answer is charged as a small call, not a heavy one.
     const unchanged = notModified(req.headers['if-none-match'], etagOf(key, version));
     if (!pass(unchanged ? 1 : costOf(path, since, ix.notes.length), OPEN.has(path))) return;
-    const names = isName ? nameRoute(path) : null;
-    if (names && names.code !== 200) return send(names.code, names.body); // a miss is not kept: unknown names are endless
-    const a = isName ? answer(key, version, () => names.body) : answer(key, version, () => route(col, ix, new URLSearchParams(since ? { since: String(since) } : {})));
+    const a = answer(key, version, () => route(col, ix, new URLSearchParams(since ? { since: String(since) } : {})));
     return await sendAnswer(req, res, a, { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base() });
   } catch (e) {
     if (res.headersSent) return res.destroy();

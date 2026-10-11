@@ -3,7 +3,7 @@
 Every Shielded Ordinals indexer answers the same read API. You can call:
 
 - **your own indexer**, at `http://127.0.0.1:5021` after following [RUN-AN-INDEXER.md](RUN-AN-INDEXER.md). No key, no limit.
-- **the hosted API run by Ord Dropz**, at `https://shielded-public-api-production.up.railway.app`, with an API key from Ord Dropz. Every call needs the key except `/status`, `/collections` and `/health`.
+- **the hosted API run by Ord Dropz**, at `https://shielded-public-api-production.up.railway.app`, with an API key from Ord Dropz. Every call needs the key except `/status`, `/collections`, `/names/info` and `/health`.
 
 Both give the same answers at the same block. Everything served is public data read from Bitcoin. Nothing in this API can move a piece or reveal who holds one.
 
@@ -34,7 +34,7 @@ Every call counted against a key or an address says what it was charged in the `
 | Caller | Allowance |
 |---|---|
 | With a key | 60 units a minute and 5,000 units a day, unless Ord Dropz set other limits for your key |
-| Without a key | `/status` only: 30 units a minute, shared by everyone at the same network address |
+| Without a key | `/status`, `/collections` and `/names/info` only: 30 units a minute, shared by everyone at the same network address |
 
 Every answer says where you stand:
 
@@ -135,7 +135,7 @@ The collection and its rules.
 |---|---|
 | `rulesInscriptionId` | The parent inscription. Its content is the rules |
 | `cid` | The collection id carried in every message: first 8 bytes of SHA-256 of the parent id, in hex |
-| `rules` | The rules as inscribed: `name`, `supply`, `mintPrice`, `mintFee`, `saleFeeBps`, `saleFeeMin`, `ticketPrice`, `inscribeFee`, and the keys. Amounts are in sats |
+| `rules` | The rules exactly as inscribed: the parent inscription's JSON, every key in it and nothing else (`name`, `supply`, `mintPrice`, `mintFee`, `saleFeeBps`, `saleFeeMin`, `ticketPrice`, `inscribeFee` when inscribed, the keys, and the payout scripts `artistPayoutScript`, `platformPayoutScript` and `relayerPayoutScript` in hex). Amounts are in sats |
 | `minted` | Pieces minted so far |
 | `lastHeight` | The block this answer is from |
 | `global` | The collection's global number range, `{ "start": 0, "end": 3332, "height": …, "txid": … }`, or `null` before its first mint |
@@ -220,33 +220,78 @@ Every shielded collection found on Bitcoin, in global number order.
 
 A collection takes its number range at its first valid mint. `range` is `null` until then.
 
+### Shielded names
+
+A shielded name (`obi.naka`, `obi.shield`) points at a shielded address. The first inscription of a label wins, for ever. The names routes are the same answer under any `/c/<cid>/` prefix. They change only when the registry applies a block, so their ETag is `"<height>-<last 8 hex of that block's hash>-<12 hex>"`: a block replaced at the same height changes it.
+
+Bad input gets a `400` before anything is counted (no units charged). A valid name nobody holds gets a `404`, counted like any lookup:
+
+| Status | Body | Meaning |
+|---|---|---|
+| `400` | `{"error":"not a valid name"}` | Not a name: `a.naka` (a label is 3 to 20 letters, digits or dashes), `x--y.naka`, `obi.btc` (the endings are `.naka` and `.shield`) |
+| `400` | `{"error":"that name is reserved"}` | A label nobody can take, such as `admin.naka` |
+| `400` | `{"error":"malformed %-escape in the name"}` | The path is not valid URL encoding (also `… in the address`) |
+| `400` | `{"error":"not a shielded address"}` | `/names/of/` with something that is not `shord1` and 128 hex digits |
+| `400` | `{"error":"after must be a whole number"}` | `/names?after=` with anything but digits |
+| `400` | `{"error":"after is past the last name (there are …)"}` | `/names?after=` beyond the end of the list |
+| `404` | `{"error":"nobody has that name"}` | A valid name nobody holds. Counted (1 unit) like any lookup |
+
 ### `GET /names/info`
 
-The state of the shielded names index.
+The state of the shielded names index. Needs no key.
 
 ```json
 { "start": 969800, "height": 970084, "count": 12, "digest": "39cc12ba…", "index": { "start": 969800, "height": 970084, "count": 12, "digest": "39cc12ba…" } }
 ```
 
-Two indexers at the same `height` with the same `digest` hold the same names.
+Two indexers at the same `height` with the same `digest` hold the same names. Your own names index can check the hosted one without a key: `node tools/names-indexer.mjs --compare https://shielded-public-api-production.up.railway.app/names/info`.
 
-### `GET /names/<name>`
+### `GET /names?after=<i>`
 
-The shielded address a name points at.
+Every name, in the order they were accepted, 500 to a page. 1 unit a page. `after` is how many names to skip (default `0`); `next` is the `after` of the next page, or `null` after the last name.
 
 ```
-curl https://shielded-public-api-production.up.railway.app/names/obi.naka
+curl -H "x-api-key: shord_…" "https://shielded-public-api-production.up.railway.app/names?after=0"
 ```
 
 ```json
-{ "name": "obi.naka", "address": "shord1…", "id": "<inscription id>", "height": 969806 }
+{ "start": 969800, "height": 970151, "count": 14, "digest": "b797be8e…", "after": 0, "digestBefore": "6593be23…",
+  "names": [ { "i": 0, "name": "obi.naka", "to": "shord1…", "id": "<inscription id>", "height": 969806 } ], "next": null }
 ```
 
-Answers `404` when nobody has the name. A name counts only once its inscription is in a block.
+`digestBefore` is the running digest before the page's first name, so you can check that the list is the one `/names/info` publishes: start from `sha256("shord-names-v1")` (`6593be23af5bb0fe4cdafeeaacf106417148cb74625b4141eced06ffc623a895`), and for each name in order take `sha256("<previous digest>|<height>|<id>|<name>|<to>")` (hex, as text). After the last page the result equals `digest`.
+
+```js
+const sha = async (s) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].map((b) => b.toString(16).padStart(2, '0')).join('');
+let d = await sha('shord-names-v1'), after = 0, page;
+do {
+  page = await (await fetch(`${API}/names?after=${after}`, { headers: { 'x-api-key': KEY } })).json();
+  if (page.digestBefore !== d) throw new Error('this page does not continue the list');
+  for (const n of page.names) d = await sha(`${d}|${n.height}|${n.id}|${n.name}|${n.to}`);
+  after = page.next;
+} while (after !== null);
+// d === page.digest: every name, and the same names /names/info publishes
+```
+
+An `after` past the last name gets `400` (a block replaced at the tip can take a name away: read the list again from `0`).
+
+### `GET /names/<name>`
+
+The shielded address a name points at. Upper and lower case are the same name.
+
+```
+curl -H "x-api-key: shord_…" https://shielded-public-api-production.up.railway.app/names/obi.naka
+```
+
+```json
+{ "name": "obi.naka", "address": "shord1…", "to": "shord1…", "id": "<inscription id>", "height": 969806 }
+```
+
+`to` and `address` are the same value (`to` is the field `/names/of` and `/names` use; `address` is kept for clients written before). Answers `404` when nobody has the name, and `400` when it is not a valid name or the label is reserved. A name counts only once its inscription is in a block.
 
 ### `GET /names/of/<shielded address>`
 
-Every name pointing at an address, earliest first: `{ "names": [ { "name", "label", "to", "id", "height" } ] }`.
+Every name pointing at an address, earliest first: `{ "names": [ { "name", "label", "to", "id", "height" } ] }`. Upper and lower case are the same address; anything that is not a shielded address gets `400`.
 
 ### `GET /health`
 
@@ -265,7 +310,7 @@ API_KEYS_FILE=/data/api-keys.json node indexer/indexer.mjs
 | Variable | Meaning | Default |
 |---|---|---|
 | `API_KEYS_FILE` | Where key hashes are kept. Setting it turns keys and limits on | off |
-| `API_KEY_REQUIRED` | `1` refuses every call without a key, except `/status`, `/collections` and `/health` | `0` |
+| `API_KEY_REQUIRED` | `1` refuses every call without a key, except `/status`, `/collections`, `/names/info` and `/health` | `0` |
 | `PUBLIC_LIMIT` | Units a minute for callers without a key, per address. A call that costs more (the full `/state` is 20) gets `403` | `30` |
 | `TRUST_PROXY` | How many proxies stand in front of the indexer. The caller's address is read that many steps back in `X-Forwarded-For`. Leave `0` when callers connect directly | `0` |
 | `ADMIN_SECRET` | A long secret that turns on key management over HTTP | off |
