@@ -91,6 +91,8 @@ console.log(`      (${((performance.now() - a0) / 1000).toFixed(1)} s)`);
   for (const x of src.leaves.slice(200, 211)) t.append(x);
   const after = [...src.leaves.slice(100, 133), ...src.leaves.slice(200, 211)];
   check('  and later appends stay incremental and equal tree-v0', t.root() === v0Of(after).root() && sameLayers(t.layers(), v0Of(after).layers()));
+  t.leaves = src.leaves.slice(300, 344); // the same count as before, other leaves
+  check('  assigning as many leaves as it had, but other ones, also rebuilds', t.leaves.length === after.length && t.root() === v0Of(src.leaves.slice(300, 344)).root());
 
   // the leaves changed without append(): the next call does a full build, as tree-v0 would from scratch
   const u = new NoteTree(DEPTH);
@@ -105,9 +107,13 @@ console.log(`      (${((performance.now() - a0) / 1000).toFixed(1)} s)`);
   const root300 = base.root();
   const layers300 = base.layers().map((l) => l.slice());
   const c = base.clone();
+  const cLayers = c.layers(); // read before the original changes, compared after without calling c again
+  check('a clone owns its arrays (no leaves or layer array is shared with the original)',
+    c.leaves !== base.leaves && cLayers !== base.layers() && cLayers.every((l, d) => l !== base.layers()[d]));
   for (const x of src.leaves.slice(300, 340)) base.append(x);
   base.root();
-  check('a clone does not change when the original gets new appends', c.leaves.length === 300 && c.root() === root300 && sameLayers(c.layers(), layers300));
+  check('a clone does not change when the original gets new appends',
+    sameLayers(cLayers, layers300) && c.leaves.length === 300 && c.root() === root300 && sameLayers(c.layers(), layers300));
   check('  and the original has the new leaves', base.root() === v0Of(src.leaves.slice(0, 340)).root());
   const rootBase = base.root();
   for (const x of src.leaves.slice(500, 520)) c.append(x);
