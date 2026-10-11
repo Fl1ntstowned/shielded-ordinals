@@ -27,6 +27,7 @@
 // GET /names/info, /names/<name>, /names/of/<shielded address>      shielded names
 // GET /collections                 every shielded collection this indexer follows (found on chain)
 // GET /c/<cid>/status|state|listings|collection   the same routes for one collection by its cid
+// More routes come from route modules: indexer/routes/index.mjs
 //
 // Every shielded collection found on Bitcoin (the registry sees each parent inscription) gets its
 // own copy of the rules engine, replayed from its parent's block, all sharing one block cache. The
@@ -50,6 +51,7 @@ import { knownCollection, COLLECTIONS } from '../src/v1/collections.mjs';
 import { makeGate, Limiter, callerAddress } from './keys.mjs';
 import { costOf, OPEN, etagOf, makeAnswers, sendAnswer } from './serve.mjs';
 import { compare } from './compare.mjs';
+import routeModules from './routes/index.mjs';
 
 const env = (k, d) => { const v = process.env[k]?.trim(); if (v) return v; if (d !== undefined) return d; throw new Error(`missing ${k}`); };
 const args = process.argv.slice(2);
@@ -275,7 +277,26 @@ const nameRoute = (p) => {
 };
 
 // Every answer is built once per block and kept compressed (serve.mjs); costOf and OPEN price them.
-const { answer } = makeAnswers();
+const answers = makeAnswers();
+const { answer } = answers;
+
+// Route modules (indexer/routes/index.mjs, where the contract is written): tried after the built-in
+// routes and the names, in list order.
+for (const m of routeModules) {
+  if (!m?.id || !['collection', 'global'].includes(m.scope) || !['shared', 'own'].includes(m.keep)
+    || typeof m.match !== 'function' || typeof m.parse !== 'function' || typeof m.build !== 'function') throw new Error(`route module "${m?.id ?? '?'}" does not follow the contract in indexer/routes/index.mjs`);
+}
+if (new Set(routeModules.map((m) => m.id)).size !== routeModules.length) throw new Error('two route modules have the same id');
+const moduleFor = (path) => {
+  for (const m of routeModules) { const params = m.match(path); if (params != null && params !== false) return { m, params }; }
+  return null;
+};
+const ownAnswers = new Map(); // module id -> its own cache (keep: 'own')
+const cacheOf = (m) => {
+  if (m.keep !== 'own') return answers;
+  if (!ownAnswers.has(m.id)) ownAnswers.set(m.id, makeAnswers({ limit: m.limit ?? 32 }));
+  return ownAnswers.get(m.id);
+};
 
 http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://x');
@@ -292,8 +313,38 @@ http.createServer(async (req, res) => {
     const { col, path } = byPath(url.pathname);
     const route = routes[path];
     const isName = path.startsWith('/names/') && path.length > '/names/'.length;
-    if (req.method !== 'GET' || (!route && !isName)) return send(404, { error: 'not found' });
+    const mod = route || isName ? null : moduleFor(path);
+    if (req.method !== 'GET' || (!route && !isName && !mod)) return send(404, { error: 'not found' });
     if (!col) return send(404, { error: 'no such collection here; see /collections' });
+    if (mod) {
+      // a route module: a collection route answers for the collection named by the prefix (the
+      // primary without one), a global route is the same answer under any prefix
+      const { m, params } = mod;
+      const scoped = m.scope === 'collection';
+      if (col.skipped && scoped) return send(409, { error: col.skipped });
+      const c = scoped ? col : primary;
+      const ix = c.chain.ix();
+      if (!ix) {
+        if (gate) { const g = gate.check(req, 1, { open: !!m.open }); extra = g.headers; if (!g.ok) return send(g.status, { error: g.error }); }
+        return send(503, { error: 'still syncing' });
+      }
+      const q = url.searchParams;
+      const p = m.parse({ params, q, ix, col: c });
+      if ('status' in p) return send(p.status, p.body); // refused before the gate: free
+      const reg = registry.registry();
+      const height = scoped ? ix.lastHeight : (reg?.lastHeight ?? ix.lastHeight);
+      const ctx = { col: c, ix, params, q, height, hash: (scoped ? null : registry.hashAt(height)) ?? c.chain.hashAt(height), registry: reg, names: namesOf(), hooks: c.chain.hooks };
+      const version = m.version ? String(m.version(ctx)) : `${height}`;
+      const key = (scoped && c !== primary ? `/c/${c.cid}` : '') + p.key;
+      const unchanged = req.headers['if-none-match'] === etagOf(key, version);
+      if (gate) {
+        const g = gate.check(req, unchanged ? 1 : p.cost, { open: !!m.open });
+        extra = g.headers;
+        if (!g.ok) return send(g.status, { error: g.error });
+      }
+      const a = cacheOf(m).answer(key, version, () => m.build(ctx));
+      return sendAnswer(req, res, a, { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base(), ...(m.headers?.(ctx) ?? {}) });
+    }
     // names, /registry and /collections are the same answer under any /c/<cid>/ prefix
     const global = isName || GLOBAL.has(path);
     if (col.skipped && !global) return send(409, { error: col.skipped });
