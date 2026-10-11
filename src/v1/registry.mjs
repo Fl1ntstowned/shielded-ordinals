@@ -90,7 +90,8 @@ function pays(outs, demands) {
 export class Registry {
   constructor(network) {
     this.network = network; // bitcoinjs network
-    this.collections = new Map(); // cid hex -> { id, name, supply, height, rules, range: { start, end, height, txid } | null }
+    this.collections = new Map(); // cid hex -> { id, name, supply, height, rules, range: { start, end, height, txid } | null, text }
+    // (text = the parent's rules JSON exactly as inscribed)
     this.next = 0;
     this.names = new NameIndex(NAMES_START[network?.bech32 === 'bc' ? 'mainnet' : 'signet'] ?? null); // shielded names: first inscription of a label wins
     this.lastHeight = null;
@@ -121,7 +122,7 @@ export class Registry {
         const cid = toHex(collectionId(it.id));
         if (!this.collections.has(cid)) {
           const rules = parseRules(it.text);
-          this.collections.set(cid, { id: it.id, name: rules.name, supply: rules.supply, height, rules, range: null });
+          this.collections.set(cid, { id: it.id, name: rules.name, supply: rules.supply, height, rules, range: null, text: it.text });
         }
         continue;
       }
