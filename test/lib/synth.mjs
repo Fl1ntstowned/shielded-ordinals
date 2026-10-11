@@ -12,6 +12,7 @@
 //   follower({ network: 'signet', source: chain.source, ... })      the fake source, in process
 //   const esplora = await serveEsplora(chain);  CHAIN_API=esplora.url   an esplora API over HTTP
 //   chain.source.fork(h)  replaces the blocks from h with new ones (a reorg)
+//   chain.source.calls    every call the source answered, by kind (hash = hashAt, hashes = hashesFrom)
 //
 // Blocks are real Bitcoin blocks (merkle root, witness commitment, proof of work at the regtest
 // target), so verifiedBlock() accepts them. Transactions spend made-up coins; the prevout script of
@@ -29,7 +30,7 @@ import {
 import { parseRules, collectionId, saleFee } from '../../src/v1/rules.mjs';
 import { gateScript, lockScript } from '../../src/v1/scripts.mjs';
 import { Indexer, envelopesOf } from '../../src/v1/indexer.mjs';
-import { verifiedBlock, networkOf } from '../../src/v1/follow.mjs';
+import { verifiedBlock, networkOf, linkedHashes } from '../../src/v1/follow.mjs';
 import { CT_LEN } from '../../src/v1/core.mjs';
 import { nameRecord } from '../../src/v1/names.mjs';
 
@@ -243,6 +244,15 @@ export class SynthChain {
   setTip(h) { this.shown = h; }
   tipHeight() { const real = this._height(); return this.shown === null ? real : Math.min(real, this.shown); }
   hashAt(h) { return h >= this.start && h <= this.tipHeight() ? this.best[h - this.start] : null; }
+  /** The hash of the block under block h (zeros under the first block). */
+  prevHashAt(h) { return h > this.start ? this.best[h - this.start - 1] : '00'.repeat(32); }
+  /** hashesFrom's answer (follow.mjs makeSource): [[height, hash, prevHash]] for top-9 .. top, top = min(h + 9, tip). */
+  hashRows(h, tip) {
+    const top = Math.min(h + 9, tip, this.tipHeight());
+    const rows = [];
+    for (let k = Math.max(this.start, top - 9); k <= top; k++) rows.push([k, this.hashAt(k), this.prevHashAt(k)]);
+    return rows;
+  }
   heights() { const out = []; for (let h = this.start; h <= this.tipHeight(); h++) out.push(h); return out; }
   rawBlock(hash) { return this.blocks.get(hash)?.raw ?? null; }
   txHex(txid) { const t = this.txs.get(txid); if (!t) throw new Error(`no tx ${txid}`); return t.tx.toHex(); }
@@ -270,13 +280,19 @@ export class SynthChain {
 
   // The chain as a follow.mjs source (makeSource's shape), counting every call.
   _source() {
-    const calls = { tip: 0, hash: 0, block: 0, prevouts: 0, txHex: 0 };
+    const calls = { tip: 0, hash: 0, hashes: 0, block: 0, prevouts: 0, txHex: 0 };
     const missing = (what) => Object.assign(new Error(`${what}: 404`), { status: 404 });
     return {
       kind: 'synthetic', label: 'a synthetic chain', get: null, rpc: null, calls,
       tipHeight: async () => { calls.tip++; return this.tipHeight(); },
       hashAt: async (h) => { calls.hash++; const x = this.hashAt(h); if (!x) throw missing(`/block-height/${h}`); return x; },
-      block: async (hash) => { calls.block++; const raw = this.rawBlock(hash); if (!raw) throw missing(`/block/${hash}`); return verifiedBlock(raw, hash); },
+      hashesFrom: async (h, tip) => {
+        calls.hashes++;
+        const top = Math.min(h + 9, tip);
+        if (top > this.tipHeight() || top < this.start) throw missing(`/blocks/${top}`);
+        return linkedHashes(this.hashRows(h, tip), top);
+      },
+      block: async (hash, opts) => { calls.block++; const raw = this.rawBlock(hash); if (!raw) throw missing(`/block/${hash}`); return verifiedBlock(raw, hash, opts); },
       prevoutScripts: async (_hash, txid) => { calls.prevouts++; return this.prevoutScripts(txid); },
       txHex: async (txid) => { calls.txHex++; return this.txHex(txid); },
       fork: (height, blocks) => this.fork(height, blocks),
@@ -287,25 +303,41 @@ export class SynthChain {
 
 /**
  * The chain as an esplora API over HTTP (the subset an indexer uses): /blocks/tip/height,
- * /block-height/<h>, /block/<hash>/raw, /tx/<txid> (prevouts and status), /tx/<txid>/hex.
- * Returns { url, calls, heights (every height asked for), close() }.
+ * /block-height/<h>, /blocks/<h> (the 10 blocks h, h-1, … with id and previousblockhash),
+ * /block/<hash>/raw, /tx/<txid> (prevouts and status), /tx/<txid>/hex.
+ * Returns { url, calls, heights (every height asked for, by /block-height or /blocks), setDelay(ms)
+ * (each /block/<hash>/raw answers that much later), close() }.
  */
 export async function serveEsplora(chain, { port = 0 } = {}) {
-  const calls = { tip: 0, hash: 0, raw: 0, tx: 0, hex: 0, other: 0 };
+  const calls = { tip: 0, hash: 0, blocks: 0, raw: 0, tx: 0, hex: 0, other: 0 };
   const heights = [];
+  let delay = 0;
   const server = http.createServer((req, res) => {
     const p = new URL(req.url ?? '/', 'http://x').pathname;
     const send = (code, body, type = 'text/plain') => { res.writeHead(code, { 'content-type': type }); res.end(body); };
     let m;
     try {
       if (p === '/blocks/tip/height') { calls.tip++; return send(200, String(chain.tipHeight())); }
+      if ((m = /^\/blocks\/(\d+)$/.exec(p))) {
+        calls.blocks++;
+        const top = Number(m[1]);
+        heights.push(top);
+        if (top > chain.tipHeight() || top < chain.start) return send(404, 'Block not found');
+        const rows = chain.hashRows(top, top).reverse().map(([height, id, prev]) => ({ id, height, previousblockhash: prev }));
+        return send(200, JSON.stringify(rows), 'application/json');
+      }
       if ((m = /^\/block-height\/(\d+)$/.exec(p))) {
         calls.hash++;
         heights.push(Number(m[1]));
         const h = chain.hashAt(Number(m[1]));
         return h ? send(200, h) : send(404, 'Block not found');
       }
-      if ((m = /^\/block\/([0-9a-f]{64})\/raw$/.exec(p))) { calls.raw++; const raw = chain.rawBlock(m[1]); return raw ? send(200, raw, 'application/octet-stream') : send(404, 'Block not found'); }
+      if ((m = /^\/block\/([0-9a-f]{64})\/raw$/.exec(p))) {
+        calls.raw++;
+        const raw = chain.rawBlock(m[1]);
+        if (!raw) return send(404, 'Block not found');
+        return delay ? void setTimeout(() => send(200, raw, 'application/octet-stream'), delay) : send(200, raw, 'application/octet-stream');
+      }
       if ((m = /^\/tx\/([0-9a-f]{64})\/hex$/.exec(p))) { calls.hex++; return chain.txs.has(m[1]) ? send(200, chain.txHex(m[1])) : send(404, 'Transaction not found'); }
       if ((m = /^\/tx\/([0-9a-f]{64})$/.exec(p))) {
         calls.tx++;
@@ -326,7 +358,7 @@ export async function serveEsplora(chain, { port = 0 } = {}) {
   });
   await new Promise((ok) => server.listen(port, '127.0.0.1', ok));
   return {
-    url: `http://127.0.0.1:${server.address().port}`, calls, heights, server,
+    url: `http://127.0.0.1:${server.address().port}`, calls, heights, server, setDelay: (ms) => { delay = ms; },
     close: () => new Promise((ok) => { server.closeAllConnections?.(); server.close(ok); }),
   };
 }
