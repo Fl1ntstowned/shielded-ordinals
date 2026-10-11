@@ -44,7 +44,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { follower, registryFollower, loadRules, makeSource, defaultApi } from '../src/v1/follow.mjs';
+import { follower, registryFollower, loadRulesInfo, makeSource, defaultApi } from '../src/v1/follow.mjs';
 import { exportState } from '../src/v1/view.mjs';
 import { saleFee, vkeyHash, collectionId } from '../src/v1/rules.mjs';
 import { REGISTRY_START } from '../src/v1/registry.mjs';
@@ -79,8 +79,8 @@ const RULES_BLOCK = known?.rulesBlock ?? (process.env.RULES_BLOCK?.trim() || nul
 const VKEY = JSON.parse(fs.readFileSync(fileURLToPath(new URL('../zk/spend_vkey.json', import.meta.url)), 'utf8'));
 if (known?.spendVkeyHash && vkeyHash(VKEY) !== known.spendVkeyHash) throw new Error(`zk/spend_vkey.json is not the verification key of "${name}"`);
 
-const rulesText = process.env.RULES_FILE ? fs.readFileSync(process.env.RULES_FILE, 'utf8') : null;
-const rules = await loadRules({ source, rulesInscriptionId: RULES_ID, rulesFile: process.env.RULES_FILE, rulesBlock: RULES_BLOCK });
+// the rules, and their text exactly as inscribed (or as written in RULES_FILE): /collection serves it
+const { rules, text: rulesText } = await loadRulesInfo({ source, rulesInscriptionId: RULES_ID, rulesFile: process.env.RULES_FILE, rulesBlock: RULES_BLOCK, withHeight: false });
 
 // One view of the chain per sync round, shared by every follower (the registry included): the tip and
 // the last NEAR hashes are asked once per round (follow.mjs re-checks those for a reorg), deeper hashes
@@ -107,12 +107,13 @@ const newRound = () => { view.tip = null; view.tipP = null; view.near.clear(); }
 
 // One rules engine per collection. Every follower shares the block cache (a cached block is the same
 // whichever collection reads it), so the second collection costs no extra downloads.
-const collections = new Map(); // cid hex -> { cid, id, rules, start, chain, skipped }
-const follow = (id, r, start) => {
+const collections = new Map(); // cid hex -> { cid, id, rules, start, chain, skipped, text }
+// text: the rules exactly as inscribed (null when not known)
+const follow = (id, r, start, text = null) => {
   let shown = 0;
   const cid = collectionId(id).toString('hex');
   const entry = {
-    cid, id, rules: r, start, skipped: null,
+    cid, id, rules: r, start, skipped: null, text,
     chain: follower({
       network: NETWORK, source: shared, cacheDir: CACHE, rulesInscriptionId: id, rules: r, vkey: VKEY, startHeight: start,
       onProgress: (h, tip) => { if (h === tip || Date.now() - shown > 15_000) { shown = Date.now(); console.error(`  ${r.name}: replayed to ${h} / ${tip}`); } },
@@ -121,7 +122,7 @@ const follow = (id, r, start) => {
   collections.set(cid, entry);
   return entry;
 };
-const primary = follow(RULES_ID, rules, START);
+const primary = follow(RULES_ID, rules, START, rulesText);
 const chain = primary.chain;
 const regStart = process.env.REGISTRY_START ? Number(process.env.REGISTRY_START) : REGISTRY_START[NETWORK];
 const registry = registryFollower({ network: NETWORK, source: shared, cacheDir: CACHE, startHeight: regStart });
@@ -140,7 +141,7 @@ function discover() {
       continue;
     }
     console.error(`found "${c.rules.name}" (${c.id}) at block ${c.height}; following it`);
-    found.push(follow(c.id, c.rules, c.height));
+    found.push(follow(c.id, c.rules, c.height, c.text ?? null)); // the registry keeps the parent's text
   }
   return found;
 }
@@ -162,7 +163,13 @@ const byPath = (pathname) => {
 };
 
 export const digestOf = (ix) => crypto.createHash('sha256').update(ix.stateDigest()).digest('hex');
-const rawRules = (col) => (col === primary && rulesText ? JSON.parse(rulesText) : Object.fromEntries(Object.entries(col.rules).filter(([k]) => !/Script$|^fileMint$/.test(k))));
+// /collection's rules: the parent's JSON exactly as inscribed (the payout scripts included). Without
+// the text, the parsed rules minus what the engine adds: the scripts as bytes, fileMint, and the rune
+// fields (runeMode, lotStarts).
+const ENGINE_KEYS = new Set(['fileMint', 'runeMode', 'lotStarts']);
+const rawRules = (col) => (col.text
+  ? JSON.parse(col.text)
+  : Object.fromEntries(Object.entries(col.rules).filter(([k, v]) => !(v instanceof Uint8Array) && !ENGINE_KEYS.has(k)))); // (a Buffer is a Uint8Array)
 const statusOf = (col, ix) => ({
   network: NETWORK, collection: col.rules.name, rulesInscriptionId: col.id, cid: col.cid, lastHeight: ix.lastHeight, blockHash: col.chain.hashAt(ix.lastHeight),
   notes: ix.notes.length, digest: digestOf(ix), software: 'shielded-ordinals indexer',
