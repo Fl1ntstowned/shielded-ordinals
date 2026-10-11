@@ -21,7 +21,8 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'shord-dispatch-'));
 let pass = 0, fail = 0;
 const check = (label, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${ok || detail === undefined ? '' : `\n      ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`}`); ok ? pass++ : fail++; };
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
-const oldEtag = (version, key) => `"${version}-${sha(key).slice(0, 12)}"`;
+// ETag = "<version>-<12 hex of sha256(cache key)>"; the default version is "<height>-<last 8 hex of the block hash>"
+const etagOf = (version, key) => `"${version}-${sha(key).slice(0, 12)}"`;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const quiet = async (fn) => { const e = console.error, w = console.warn; console.error = () => {}; console.warn = () => {}; try { return await fn(); } finally { console.error = e; console.warn = w; } };
 
@@ -101,6 +102,7 @@ const plain = follower({ network: 'signet', source: chain.source, cacheDir: fdir
 await plain.sync();
 check('follower: without hooks it works as before (hooks = [])', Array.isArray(plain.hooks) && plain.hooks.length === 0 && plain.ix().stateDigest() === f.ix().stateDigest());
 const TIP = chain.tipHeight();
+const V = `${TIP}-${chain.hashAt(TIP).slice(-8)}`; // the version of every answer at the tip
 
 // ---- registry: block hashes and the inscribed rules text
 const rf = registryFollower({ network: 'signet', source: chain.source, cacheDir: path.join(tmp, 'registry'), startHeight: S0 });
@@ -197,22 +199,22 @@ const port = A.port;
   const st = await get(port, '/status');
   const status = st.json();
   check('server: /status is the primary at the tip, with the collection count', status.lastHeight === TIP && status.cid === P.cidHex && status.collections === 3 && status.blockHash === chain.hashAt(TIP) && status.digest === sha(f.ix().stateDigest()));
-  check('server: /status ETag follows the old formula "<height>-<sha256(key)[0:12]>"', st.headers.etag === oldEtag(TIP, '/status'), st.headers.etag);
+  check('server: /status ETag is "<height>-<last 8 hex of the block hash>-<sha256(key)[0:12]>"', st.headers.etag === etagOf(V, '/status'), st.headers.etag);
   const three = await Promise.all([`/c/${Q.cidHex}`, `/c/${Q.cidHex}/`, `/c/${Q.cidHex}/status`].map((u) => get(port, u)));
-  check('server: /c/<cid>, /c/<cid>/ and /c/<cid>/status are one answer with one ETag', three.every((r) => r.status === 200 && r.headers.etag === oldEtag(TIP, `/c/${Q.cidHex}/status`) && r.body.equals(three[0].body)) && three[0].json().cid === Q.cidHex, three.map((r) => [r.status, r.headers.etag]));
+  check('server: /c/<cid>, /c/<cid>/ and /c/<cid>/status are one answer with one ETag', three.every((r) => r.status === 200 && r.headers.etag === etagOf(V, `/c/${Q.cidHex}/status`) && r.body.equals(three[0].body)) && three[0].json().cid === Q.cidHex, three.map((r) => [r.status, r.headers.etag]));
   const cp = await get(port, `/c/${P.cidHex}/status`);
   check('server: /c/<primary>/status equals /status (body and ETag)', cp.headers.etag === st.headers.etag && cp.body.equals(st.body));
   const rg = await get(port, '/registry');
   const crg = await get(port, `/c/${Q.cidHex}/registry`);
-  check('server: /c/<cid>/registry equals /registry (body and ETag)', rg.status === 200 && crg.headers.etag === rg.headers.etag && crg.body.equals(rg.body) && rg.headers.etag === oldEtag(TIP, '/registry'));
+  check('server: /c/<cid>/registry equals /registry (body and ETag)', rg.status === 200 && crg.headers.etag === rg.headers.etag && crg.body.equals(rg.body) && rg.headers.etag === etagOf(V, '/registry'));
   const forms = [['/state', '/state'], ['/state?since=2', '/state?since=2'], ['/state?since=2&x=1', '/state?since=2'], ['/state?since=0', '/state'], ['/listings', '/listings'], ['/collection', '/collection'],
     ['/names/info', '/names/info'], ['/names/alice.naka', '/names/alice.naka'], [`/c/${Q.cidHex}/state`, `/c/${Q.cidHex}/state`], [`/c/${Q.cidHex}/listings`, `/c/${Q.cidHex}/listings`]];
   const tags = await Promise.all(forms.map(([u]) => get(port, u)));
-  check('server: ETags follow the old formula for every route (key = prefix + route + ?since)', tags.every((r, i) => r.status === 200 && r.headers.etag === oldEtag(TIP, forms[i][1])), tags.map((r, i) => [forms[i][0], r.status, r.headers.etag]));
+  check('server: ETags follow the formula for every route (version = height + block hash; key = prefix + route + ?since)', tags.every((r, i) => r.status === 200 && r.headers.etag === etagOf(V, forms[i][1])), tags.map((r, i) => [forms[i][0], r.status, r.headers.etag]));
   const cols = await get(port, '/collections');
   const list = cols.json();
-  const all = list.map((c) => `${c.cid}:${c.lastHeight ?? '-'}`).join(',');
-  check('server: /collections ETag is "<registry height>.<8 hex of every collection height>-<12 hex>"', cols.headers.etag === `"${TIP}.${sha(all).slice(0, 8)}-${sha('/collections').slice(0, 12)}"`, cols.headers.etag);
+  const all = list.map((c) => (c.lastHeight === null ? `${c.cid}:-` : `${c.cid}:${c.lastHeight}-${chain.hashAt(c.lastHeight).slice(-8)}`)).join(',');
+  check('server: /collections ETag is "<registry height>.<8 hex of every collection height and block>-<registry block hash8>-<12 hex>"', cols.headers.etag === `"${TIP}.${sha(all).slice(0, 8)}-${chain.hashAt(TIP).slice(-8)}-${sha('/collections').slice(0, 12)}"`, cols.headers.etag);
   check('server: /collections lists the primary, the second and the skipped one', same(list.map((c) => [c.cid, !!c.primary, !!c.skipped, c.lastHeight]), [[P.cidHex, true, false, TIP], [Q.cidHex, false, false, TIP], [K.cidHex, false, true, null]]));
   const sk = await get(port, `/c/${K.cidHex}/status`);
   check('server: a skipped collection gives 409', sk.status === 409 && /verification key/.test(sk.json().error));
@@ -303,13 +305,13 @@ export default routes;`;
   const r1 = await get(port, '/probe/5', K1);
   const b1 = r1.json();
   check('modules: a collection route answers for the primary with ctx (height, hash, registry, names, hooks)', r1.status === 200 && b1.cid === P.cidHex && b1.height === TIP && b1.hash === chain.hashAt(TIP) && b1.notes === 7 && b1.registry === TIP && b1.names === TIP && b1.hooks === true, b1);
-  check('modules: the default version is the height; ETag "<height>-<sha256(key)[0:12]>"; headers() are added', r1.headers.etag === oldEtag(TIP, '/probe/5') && r1.headers['x-probe'] === 'yes');
+  check('modules: the default version is the height and block hash; ETag "<height>-<hash8>-<sha256(key)[0:12]>"; headers() are added', r1.headers.etag === etagOf(V, '/probe/5') && r1.headers['x-probe'] === 'yes');
   const r2 = await get(port, '/probe/5', K1);
   check('modules: the gate charges parse()\'s cost', left(r1) - left(r2) === 3);
   const r3 = await get(port, '/probe/5', { ...K1, 'if-none-match': r1.headers.etag });
   check('modules: a 304 costs 1 and keeps the extra headers', r3.status === 304 && left(r2) - left(r3) === 1 && r3.headers['x-probe'] === 'yes');
   const rq = await get(port, `/c/${Q.cidHex}/probe/5`, K1);
-  check('modules: under /c/<cid>/ a collection route answers for that collection (key /c/<cid>/...)', rq.json().cid === Q.cidHex && rq.json().notes === 1 && rq.headers.etag === oldEtag(TIP, `/c/${Q.cidHex}/probe/5`));
+  check('modules: under /c/<cid>/ a collection route answers for that collection (key /c/<cid>/...)', rq.json().cid === Q.cidHex && rq.json().notes === 1 && rq.headers.etag === etagOf(V, `/c/${Q.cidHex}/probe/5`));
   const rp = await get(port, `/c/${P.cidHex}/probe/5`, K1);
   check('modules: /c/<primary>/... is the unprefixed answer', rp.headers.etag === r1.headers.etag && rp.body.equals(r1.body));
   check('modules: a skipped collection gives 409, an unknown cid 404', (await get(port, `/c/${K.cidHex}/probe/5`, K1)).status === 409 && (await get(port, '/c/0123456789abcdef/probe/5', K1)).status === 404);
@@ -317,7 +319,7 @@ export default routes;`;
   check('modules: answers over 1 KB are gzipped', big.headers['content-encoding'] === 'gzip' && big.body[0] === 0x1f && big.body[1] === 0x8b && JSON.parse(zlib.gunzipSync(big.body)).n === 50);
   check('modules: no match, or a POST, gives 404', (await get(port, '/probe/x', K1)).status === 404 && (await get(port, '/probe/5', K1, 'POST')).status === 404);
   const w = await get(port, '/whole/a');
-  check('modules: an open global route needs no key; version() sets the ETag; ctx.hash is the registry\'s', w.status === 200 && w.headers.etag === oldEtag(`w${TIP}`, '/whole/a') && w.json().hash === chain.hashAt(TIP));
+  check('modules: an open global route needs no key; version() sets the ETag; ctx.hash is the registry\'s', w.status === 200 && w.headers.etag === etagOf(`w${TIP}`, '/whole/a') && w.json().hash === chain.hashAt(TIP));
   const wq = await get(port, `/c/${Q.cidHex}/whole/a`);
   const wk = await get(port, `/c/${K.cidHex}/whole/a`);
   check('modules: a global route is the same answer under any prefix, a skipped one too', wq.headers.etag === w.headers.etag && wq.body.equals(w.body) && wk.status === 200 && wk.body.equals(w.body));
@@ -325,7 +327,7 @@ export default routes;`;
   for (const x of ['b', 'a', 'c', 'a', 'b']) order.push(`${x}${(await get(port, `/whole/${x}`)).json().build}`);
   check("modules: keep 'own' keeps the `limit` most recently used answers", same(order, ['b2', 'a1', 'c3', 'a1', 'b4']), order);
   const st = await get(port, '/status');
-  check('modules: the built-in routes are unchanged', st.status === 200 && st.headers.etag === oldEtag(TIP, '/status'));
+  check('modules: the built-in routes are unchanged', st.status === 200 && st.headers.etag === etagOf(V, '/status'));
   // a price that is not a whole number of units would pass the gate for free and leave the key's
   // count broken (NaN) for the rest of the minute and the day
   const pb = await get(port, '/probe/5', K1);

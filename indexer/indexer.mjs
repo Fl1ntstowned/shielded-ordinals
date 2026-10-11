@@ -37,8 +37,9 @@
 //
 // Serving other people (optional): API keys and request limits, see indexer/keys.mjs
 //   API_KEYS_FILE=api-keys.json  [API_KEY_REQUIRED=1]  [PUBLIC_LIMIT=30]  [TRUST_PROXY=<proxy hops>]
-//   Answers are built once per block, served compressed, and a client that sends If-None-Match gets
-//   a 304 for an unchanged answer. /state costs 20 units (5 with ?since=), everything else 1.
+//   Answers are built once per block and sent br or gzip (whichever the client takes), and a client
+//   that sends If-None-Match gets a 304 for an unchanged answer (indexer/serve.mjs). /state costs 20
+//   units; /state?since= 5, plus 1 per 500 notes returned, at most 20; everything else 1; a 304 1.
 //   [ADMIN_SECRET=<long secret>]   turns on key management over HTTP (POST/GET /admin/keys)
 import http from 'node:http';
 import fs from 'node:fs';
@@ -50,7 +51,7 @@ import { saleFee, vkeyHash, collectionId } from '../src/v1/rules.mjs';
 import { REGISTRY_START } from '../src/v1/registry.mjs';
 import { knownCollection, COLLECTIONS } from '../src/v1/collections.mjs';
 import { makeGate, Limiter, callerAddress } from './keys.mjs';
-import { costOf, OPEN, etagOf, makeAnswers, sendAnswer } from './serve.mjs';
+import { costOf, OPEN, etagOf, versionAt, hashTail, notModified, parseSince, makeAnswers, sendAnswer } from './serve.mjs';
 import { compare } from './compare.mjs';
 import routeModules from './routes/index.mjs';
 
@@ -197,12 +198,20 @@ const routes = {
 const GLOBAL = new Set(['/registry', '/collections']);
 // What a global answer depends on. /collections changes when ANY follower moves or a collection is
 // found, not only when the highest block changes, so its cached copy and ETag follow all of them.
+// Each version carries the hash of the block it stands on (serve.mjs versionAt), so a block replaced
+// at the same height rebuilds the answer and changes its ETag.
 const globalVersion = (path) => {
   const regH = registry.registry()?.lastHeight ?? 0;
-  if (path === '/registry') return `${regH}`;
-  const all = [...collections.values()].map((c) => `${c.cid}:${c.chain?.ix()?.lastHeight ?? '-'}`).join(',');
-  return `${regH}.${crypto.createHash('sha256').update(all).digest('hex').slice(0, 8)}`;
+  const regHash = registry.hashAt(regH);
+  if (path === '/registry') return versionAt(regH, regHash);
+  const all = [...collections.values()].map((c) => {
+    const h = c.chain?.ix()?.lastHeight ?? null;
+    return h === null ? `${c.cid}:-` : `${c.cid}:${versionAt(h, c.chain.hashAt(h))}`;
+  }).join(',');
+  return `${regH}.${crypto.createHash('sha256').update(all).digest('hex').slice(0, 8)}-${hashTail(regHash)}`;
 };
+// The version of a names answer: the registry's block (the names index lives in the registry).
+const namesVersion = (names) => versionAt(names.height, registry.hashAt(names.height));
 
 // --compare (compare.mjs): the primary's status, as /status answers it
 const primaryStatus = () => {
@@ -281,7 +290,8 @@ const nameRoute = (p) => {
   return rec ? { code: 200, body: { name: rec.name, address: rec.to, id: rec.id, height: rec.height } } : { code: 404, body: { error: 'nobody has that name' } };
 };
 
-// Every answer is built once per block and kept compressed (serve.mjs); costOf and OPEN price them.
+// Every answer is built once per version (its block) and compressed once per encoding someone asks
+// for (serve.mjs); costOf and OPEN price them.
 const answers = makeAnswers();
 const { answer } = answers;
 
@@ -315,13 +325,29 @@ const cacheOf = (m) => {
 http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://x');
   let extra = {};
-  const base = () => ({ 'access-control-allow-origin': '*', 'access-control-allow-headers': 'x-api-key, authorization, if-none-match', 'access-control-expose-headers': 'etag, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-daily-limit, x-ratelimit-daily-remaining, retry-after', ...extra });
+  // Every answer: CORS for any site. What a browser may send (allow-headers, allow-methods) and how
+  // long it may remember that (max-age) only go on the OPTIONS preflight.
+  const base = () => ({ 'access-control-allow-origin': '*', 'access-control-expose-headers': 'etag, x-cost, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-daily-limit, x-ratelimit-daily-remaining, retry-after', ...extra });
   const send = (code, body) => {
-    res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', ...base() });
-    res.end(JSON.stringify(body));
+    const bytes = Buffer.from(JSON.stringify(body));
+    res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', ...base(), 'content-length': String(bytes.length) });
+    res.end(bytes);
+  };
+  // The gate (keys.mjs), when keys are on. True: go on. False: the refusal is sent. Every gated answer
+  // says what it was charged in x-cost (0 when refused); a 403 also says the cost and the limit.
+  const pass = (cost, open) => {
+    if (!gate) return true;
+    const g = gate.check(req, cost, { open });
+    extra = { ...g.headers, 'x-cost': String(g.ok ? cost : 0) };
+    if (g.ok) return true;
+    send(g.status, g.status === 403 ? { error: g.error, cost: g.cost, limit: g.limit } : { error: g.error });
+    return false;
   };
   try {
-    if (req.method === 'OPTIONS') { res.writeHead(204, { ...base(), 'access-control-allow-methods': 'GET' }); return res.end(); }
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { ...base(), 'access-control-allow-headers': 'x-api-key, authorization, if-none-match', 'access-control-allow-methods': 'GET', 'access-control-max-age': '7200' });
+      return res.end();
+    }
     if (url.pathname === '/health') return send(200, { ok: true });
     if (url.pathname.startsWith('/admin/')) return gate && ADMIN ? await admin(req, url, send) : send(404, { error: 'not found' });
     const { col, path } = byPath(url.pathname);
@@ -338,10 +364,7 @@ http.createServer(async (req, res) => {
       if (col.skipped && scoped) return send(409, { error: col.skipped });
       const c = scoped ? col : primary;
       const ix = c.chain.ix();
-      if (!ix) {
-        if (gate) { const g = gate.check(req, 1, { open: !!m.open }); extra = g.headers; if (!g.ok) return send(g.status, { error: g.error }); }
-        return send(503, { error: 'still syncing' });
-      }
+      if (!ix) return pass(1, !!m.open) ? send(503, { error: 'still syncing' }) : undefined;
       const q = url.searchParams;
       const p = m.parse({ params, q, ix, col: c });
       if ('status' in p) return send(p.status, p.body); // refused before the gate: free
@@ -349,45 +372,45 @@ http.createServer(async (req, res) => {
       const reg = registry.registry();
       const height = scoped ? ix.lastHeight : (reg?.lastHeight ?? ix.lastHeight);
       const ctx = { col: c, ix, params, q, height, hash: (scoped ? null : registry.hashAt(height)) ?? c.chain.hashAt(height), registry: reg, names: namesOf(), hooks: c.chain.hooks };
-      const version = m.version ? String(m.version(ctx)) : `${height}`;
+      const version = m.version ? String(m.version(ctx)) : versionAt(height, ctx.hash);
       const key = (scoped && c !== primary ? `/c/${c.cid}` : '') + p.key;
-      const unchanged = req.headers['if-none-match'] === etagOf(key, version);
-      if (gate) {
-        const g = gate.check(req, unchanged ? 1 : p.cost, { open: !!m.open });
-        extra = g.headers;
-        if (!g.ok) return send(g.status, { error: g.error });
-      }
+      const unchanged = notModified(req.headers['if-none-match'], etagOf(key, version));
+      if (!pass(unchanged ? 1 : p.cost, !!m.open)) return;
       const a = cacheOf(m).answer(key, version, () => m.build(ctx));
-      return sendAnswer(req, res, a, { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base(), ...(m.headers?.(ctx) ?? {}) });
+      return await sendAnswer(req, res, a, { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base(), ...(m.headers?.(ctx) ?? {}) });
     }
     // names, /registry and /collections are the same answer under any /c/<cid>/ prefix
     const global = isName || GLOBAL.has(path);
     if (col.skipped && !global) return send(409, { error: col.skipped });
+    // ?since= of /state: a whole number, or 400 before the gate (free). Anything else used to be
+    // served as the full state.
+    const sinceText = path === '/state' ? url.searchParams.get('since') : null;
+    if (parseSince(sinceText, Infinity) === null) return send(400, { error: 'since must be a whole number' });
     const ix = global ? primary.chain.ix() : col.chain.ix();
-    if (!ix) {
-      if (gate) { const g = gate.check(req, 1, { open: OPEN.has(path) }); extra = g.headers; if (!g.ok) return send(g.status, { error: g.error }); }
-      return send(503, { error: 'still syncing' });
-    }
+    if (!ix) return pass(1, OPEN.has(path)) ? send(503, { error: 'still syncing' }) : undefined;
     // The cache key names the answer, not the URL as typed: the collection (none for the primary and
     // for global answers, so those keys and ETags are what they were before /c/ existed), the route,
     // and `since`, the only query that changes an answer. A stranger can't make the indexer keep a
-    // copy per spelling (/c/<cid>, /c/<cid>/, /c/<cid>/status are one answer).
-    const since = path === '/state' ? Math.max(0, Math.floor(Number(url.searchParams.get('since')) || 0)) : 0;
+    // copy per spelling (/c/<cid>, /c/<cid>/, /c/<cid>/status are one answer), and every since past
+    // the last note is the same answer (since = the note count).
+    const since = parseSince(sinceText, ix.notes.length);
     const key = (global || col === primary ? '' : `/c/${col.cid}`) + path + (since ? `?since=${since}` : '');
-    const height = isName ? (namesOf()?.height ?? ix.lastHeight) : GLOBAL.has(path) ? globalVersion(path) : ix.lastHeight;
+    const namesNow = isName ? namesOf() : null;
+    const version = isName ? (namesNow ? namesVersion(namesNow) : 'syncing')
+      : GLOBAL.has(path) ? globalVersion(path)
+        : versionAt(ix.lastHeight, col.chain.hashAt(ix.lastHeight));
     // The ETag is known before anything is built, so the gate goes first: a refused call never costs
     // a build, and an unchanged answer is charged as a small call, not a heavy one.
-    const unchanged = req.headers['if-none-match'] === etagOf(key, height);
-    if (gate) {
-      const g = gate.check(req, unchanged ? 1 : costOf(path, since), { open: OPEN.has(path) });
-      extra = g.headers;
-      if (!g.ok) return send(g.status, { error: g.error });
-    }
+    const unchanged = notModified(req.headers['if-none-match'], etagOf(key, version));
+    if (!pass(unchanged ? 1 : costOf(path, since, ix.notes.length), OPEN.has(path))) return;
     const names = isName ? nameRoute(path) : null;
     if (names && names.code !== 200) return send(names.code, names.body); // a miss is not kept: unknown names are endless
-    const a = isName ? answer(key, height, () => names.body) : answer(key, height, () => route(col, ix, new URLSearchParams(since ? { since: String(since) } : {})));
-    sendAnswer(req, res, a, { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base() });
-  } catch (e) { send(500, { error: e.message }); }
+    const a = isName ? answer(key, version, () => names.body) : answer(key, version, () => route(col, ix, new URLSearchParams(since ? { since: String(since) } : {})));
+    return await sendAnswer(req, res, a, { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base() });
+  } catch (e) {
+    if (res.headersSent) return res.destroy();
+    send(500, { error: e.message });
+  }
 }).listen(PORT, async () => {
   console.error(`listening on :${PORT}`);
   await syncAll();
