@@ -49,9 +49,11 @@
 // its content-length; the gate's charge is in x-cost.
 // A module only reads: nothing here may change the rules engine, the registry or a hook.
 import names from './names.mjs';
+import pieces from './pieces.mjs';
 
 export const routes = [
   ...names, // /names/info, /names, /names/of/<address>, /names/<name>
+  ...pieces, // /pieces?page=, /pieces/<assetId>, /pieces/info
 ];
 
 export default routes;

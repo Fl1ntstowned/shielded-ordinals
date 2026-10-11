@@ -119,7 +119,8 @@ Deleting `CACHE_DIR/checkpoints` is always safe: the next start replays from the
 | `CHECKPOINT_KEEP` | Checkpoints kept per collection | `4` |
 | `NETWORK` | `mainnet` or `signet` | `mainnet` |
 | `PORT` | Port the read API listens on | `5021` |
-| `CACHE_DIR` | Where read blocks, block hashes and checkpoints are kept | `.cache-indexer` |
+| `CACHE_DIR` | Where read blocks, block hashes, checkpoints and the piece index's txs are kept | `.cache-indexer` |
+| `PIECES` | `0` turns off the piece index (which child inscription is which piece, `/pieces`). It reads the txs that spend each file-mint collection's parent, one request each, once, and never changes the state or its digest | `1` |
 | `STOP_HEIGHT` | Sync no further than this block, as if it were the tip: for a replay that must stay inside the blocks already in `CACHE_DIR`, or a test. Leave it unset on an indexer that serves others | none |
 
 Give either `BITCOIN_RPC` or `CHAIN_API`. Give either `COLLECTION` or the `RULES_INSCRIPTION_ID` and `START_HEIGHT` pair.
@@ -136,7 +137,8 @@ Every route is a `GET` and answers JSON.
 | `/collection` | The collection's rules, minted count, global number range |
 | `/registry` | Every shielded collection found on Bitcoin, with its global number range |
 | `/collections` | Every collection this indexer follows, with each one's last block, note count and digest; a collection found on Bitcoin that has not minted yet is listed with `"followed": false` |
-| `/c/<cid>/…` | `/status`, `/state`, `/listings`, `/collection` for one collection by its cid |
+| `/pieces?page=<k>`, `/pieces/<assetId>`, `/pieces/info` | File-mint collections: each piece's child inscription, mint and metadata, and the art check |
+| `/c/<cid>/…` | `/status`, `/state`, `/listings`, `/collection` and `/pieces` for one collection by its cid |
 
 Field-by-field descriptions are in [API.md](API.md).
 

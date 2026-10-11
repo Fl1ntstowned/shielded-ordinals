@@ -6,7 +6,9 @@
 // json is [{ meta: { name, attributes } }]). Matched BY FILE NUMBER, never by order.
 // Output:
 //   <outDir>/art/<assetId>.png       assetId 0..supply-1 in shuffled order (what artRoot commits to)
-//   <outDir>/metadata.json           { "<assetId>": { name: "<name> #<assetId+1>", attributes } }
+//   <outDir>/metadata.json           { "<assetId>": { name: "<name> #<assetId+1>", attributes, shielded: { piece } } }
+//                                    (shielded.piece is how an indexer knows which piece a child is:
+//                                    inscribe each child with its entry as tag-5 metadata; PROTOCOL-v1.md)
 //   <outDir>/PRIVATE-shuffle.json    seed + assetId -> artist file number. Keep private until mint-out:
 //                                    with it anyone could tell which piece is which before it's minted.
 // Prints the artRoot for the parent's rules. Same seed = same shuffle (re-runnable).
@@ -60,7 +62,7 @@ order.forEach((n, assetId) => {
   const bytes = fs.readFileSync(path.join(imgDir, `${n}.png`));
   fs.writeFileSync(path.join(artOut, `${assetId}.png`), bytes);
   hashes.push(fileHash(bytes));
-  metadata[assetId] = { name: `${name} #${assetId + 1}`, attributes: traitsOf.get(n) };
+  metadata[assetId] = { name: `${name} #${assetId + 1}`, attributes: traitsOf.get(n), shielded: { piece: assetId } };
 });
 fs.writeFileSync(path.join(outDir, 'metadata.json'), JSON.stringify(metadata, null, 1));
 fs.writeFileSync(path.join(outDir, 'PRIVATE-shuffle.json'), JSON.stringify({ seed, assetIdToArtistFile: order }, null, 1));

@@ -37,7 +37,12 @@
 //                  (route modules: indexer/routes/names.mjs)
 // GET /collections                 every shielded collection this indexer follows (found on chain)
 // GET /c/<cid>/status|state|listings|collection   the same routes for one collection by its cid
+// GET /pieces?page=<k>, /pieces/<assetId>, /pieces/info    each piece's child inscription (file mint)
 // More routes come from route modules: indexer/routes/index.mjs
+//
+// The piece index (src/v1/pieces.mjs) follows each file-mint collection's parent inscription and
+// reads the txs that spend it (one request each, once; kept in <CACHE_DIR>/<network>-pieces/). It is
+// metadata only: the state and its digest are the same with it or without it. [PIECES=0] turns it off.
 //
 // Every shielded collection found on Bitcoin (the registry sees each parent inscription) gets its
 // own copy of the rules engine, replayed from its parent's block, all sharing one block cache. The
@@ -61,7 +66,8 @@ import { follower, registryFollower, loadRulesInfo, makeSource, defaultApi, CHEC
 import { exportState } from '../src/v1/view.mjs';
 import { saleFee, vkeyHash, collectionId } from '../src/v1/rules.mjs';
 import { REGISTRY_START } from '../src/v1/registry.mjs';
-import { knownCollection, COLLECTIONS } from '../src/v1/collections.mjs';
+import { knownCollection, COLLECTIONS, piecePins } from '../src/v1/collections.mjs';
+import { PieceIndex, piecesOf } from '../src/v1/pieces.mjs';
 import { makeGate, Limiter, callerAddress } from './keys.mjs';
 import { costOf, OPEN, etagOf, versionAt, hashTail, notModified, parseSince, makeAnswers, sendAnswer } from './serve.mjs';
 import { compare } from './compare.mjs';
@@ -120,14 +126,17 @@ if (!(Number.isSafeInteger(EVERY) && EVERY >= 1) || !(Number.isSafeInteger(KEEP)
 // One rules engine per collection. Every follower shares the block cache (a cached block is the same
 // whichever collection reads it), so the second collection costs no extra downloads.
 const collections = new Map(); // cid hex -> { cid, id, rules, start, chain, skipped, text }
+const PIECES = process.env.PIECES?.trim() !== '0';
 // text: the rules exactly as inscribed (null when not known)
 const follow = (id, r, start, text = null) => {
   let shown = 0;
   const cid = collectionId(id).toString('hex');
+  // the piece index rides along as a follower hook: it reads the same blocks, never the engine
+  const hooks = PIECES && PieceIndex.wants(r) ? [new PieceIndex({ rulesInscriptionId: id, rules: r, network: NETWORK, cacheDir: CACHE, pinned: piecePins(NETWORK, id) })] : [];
   const entry = {
     cid, id, rules: r, start, skipped: null, text,
     chain: follower({
-      network: NETWORK, source: shared, cacheDir: CACHE, rulesInscriptionId: id, rules: r, rulesText: text, vkey: VKEY, startHeight: start,
+      network: NETWORK, source: shared, cacheDir: CACHE, rulesInscriptionId: id, rules: r, rulesText: text, vkey: VKEY, startHeight: start, hooks,
       checkpoints: CHECKPOINTS, checkpointEvery: EVERY, checkpointKeep: KEEP,
       onProgress: (h, tip) => { if (h === tip || Date.now() - shown > 15_000) { shown = Date.now(); console.error(`  ${r.name}: replayed to ${h} / ${tip}`); } },
     }),
@@ -217,7 +226,7 @@ const routes = {
   '/status': (col, ix) => statusOf(col, ix),
   '/state': (_c, ix, q) => exportState(ix, { sinceNote: Math.max(0, Number(q.get('since')) || 0) }),
   '/listings': (col, ix) => [...ix.listings.values()].filter((l) => l.state === 'ACTIVE').map((l) => ({
-    nf: String(l.nf), assetId: l.assetId, inscriptionId: col.rules.children?.[l.assetId] ?? null, price: String(l.price),
+    nf: String(l.nf), assetId: l.assetId, inscriptionId: col.rules.children?.[l.assetId] ?? piecesOf(col.chain.hooks)?.childOf(l.assetId)?.id ?? null, price: String(l.price),
     saleFee: String(saleFee(col.rules, l.price)), tickets: l.tickets, listedAt: l.height,
   })),
   '/registry': () => registry.registry()?.list() ?? [],
@@ -226,6 +235,7 @@ const routes = {
     network: NETWORK, rulesInscriptionId: col.id, cid: ix.cid.toString('hex'), rules: rawRules(col), minted: ix.minted.size, lastHeight: ix.lastHeight,
     fileMint: !!col.rules.fileMint, inscribeFee: col.rules.inscribeFee ?? 0,
     global: registry.registry()?.collections.get(ix.cid.toString('hex'))?.range ?? null,
+    ...(piecesOf(col.chain.hooks) ? { pieces: piecesOf(col.chain.hooks).summary() } : {}),
   }),
 };
 const GLOBAL = new Set(['/registry', '/collections']);

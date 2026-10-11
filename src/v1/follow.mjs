@@ -133,6 +133,8 @@ export function linkedHashes(rows, top) {
  *                          esplora: one GET /blocks/<top>; a node: getblockhash + getblockheader (local)
  *   block(hash)            the verified block (bitcoinjs Block)
  *   prevoutScripts(hash, txid)   scriptPubKey of every coin that tx spends ([Buffer | null])
+ *   prevoutValues(hash, txid)    value in sats of every coin that tx spends ([number]; 0 for a
+ *                          coinbase input). Only the piece index (pieces.mjs) asks, and rarely.
  *   txHex(txid, blockHash) a transaction's raw hex
  *   get                    the raw HTTP getter (esplora only; null on a node)
  *   rpc                    the raw JSON-RPC caller (a node only; null on esplora)
@@ -182,6 +184,15 @@ export function makeSource({ api, rpc, rpcCookie } = {}) {
           throw new Error(`the node did not return the coins spent by ${txid}: Bitcoin Core 25.0 or newer is needed`);
         });
       },
+      async prevoutValues(hash, txid) {
+        const t = (await detailed(hash)).tx.find((x) => x.txid === txid);
+        if (!t) throw new Error(`tx ${txid} is not in block ${hash}`);
+        return t.vin.map((v) => {
+          if (v.coinbase !== undefined) return 0;
+          if (typeof v.prevout?.value !== 'number') throw new Error(`the node did not return the coins spent by ${txid}: Bitcoin Core 25.0 or newer is needed`);
+          return Math.round(v.prevout.value * 1e8); // the node answers in BTC
+        });
+      },
       // with the block hash this works on any node; without it the node needs txindex=1
       txHex: (txid, blockHash) => (blockHash ? call('getrawtransaction', txid, false, blockHash) : call('getrawtransaction', txid, false)),
     };
@@ -208,6 +219,10 @@ export function makeSource({ api, rpc, rpcCookie } = {}) {
     async prevoutScripts(_hash, txid) {
       const full = await get(`/tx/${txid}`);
       return full.vin.map((v) => (v.prevout ? Buffer.from(v.prevout.scriptpubkey, 'hex') : null));
+    },
+    async prevoutValues(_hash, txid) {
+      const full = await get(`/tx/${txid}`);
+      return full.vin.map((v) => (v.is_coinbase ? 0 : Number(v.prevout?.value)));
     },
     txHex: async (txid) => String(await get(`/tx/${txid}/hex`, 'text')).trim(),
   };
