@@ -14,7 +14,7 @@ There is no token, no sidechain and no bridge. Everything is in Bitcoin blocks.
 | `src/v1/` | The reference implementation of the rules: envelopes, rules, indexer, registry, names, chain reader, checkpoints, piece index |
 | `circuits/` | The proof circuits (circom) |
 | `zk/` | The verification keys the indexer checks proofs with |
-| `indexer/` | An indexer anyone can run, with a read API. It reads blocks from your own Bitcoin node, or from an esplora/mempool API (mempool.space by default), and follows every shielded collection it finds on chain |
+| `indexer/` | An indexer anyone can run, with a read API. It reads blocks from a Bitcoin node and follows every shielded collection it finds on chain |
 | `relayer/` | A relayer anyone can run: publishes private sends and listings in batches |
 | `cosigner/` | Co-signer software for collections that use 2-of-3 co-signers |
 | `tools/names-indexer.mjs` | A stand-alone index of shielded names (`obi.naka`) |
@@ -26,12 +26,11 @@ The code that builds transactions (minting, listing, buying, sending, withdrawin
 
 ## Run an indexer
 
-You need Node.js 20 or newer. By default blocks are read from mempool.space; to depend on no outside server, point the indexer at your own Bitcoin Core 25.0 or newer with `BITCOIN_RPC`. The first sync replays every block since 969342 and keeps them in `.cache-indexer` (about 1.1 MB per block).
+You need Node.js 20 or newer and Bitcoin Core 25.0 or newer, reached with `BITCOIN_RPC`. The first sync replays every block since 969342 and keeps them in `.cache-indexer` (about 1.1 MB per block).
 
 ```
 npm install
-COLLECTION=shielded-nakas node indexer/indexer.mjs                                                  # blocks from mempool.space
-BITCOIN_RPC=http://user:password@127.0.0.1:8332 COLLECTION=shielded-nakas node indexer/indexer.mjs  # blocks from your node
+BITCOIN_RPC=http://user:password@127.0.0.1:8332 COLLECTION=shielded-nakas node indexer/indexer.mjs
 ```
 
 Then `curl http://127.0.0.1:5021/status`. The full guide is [docs/RUN-AN-INDEXER.md](docs/RUN-AN-INDEXER.md).

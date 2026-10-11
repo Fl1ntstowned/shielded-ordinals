@@ -1,13 +1,13 @@
 # Run your own indexer
 
-The indexer reads Bitcoin blocks, applies the Shielded Ordinals rules, and holds the full public state of every shielded collection it finds: every note, every listing, every sale. It reads blocks from your own node (`BITCOIN_RPC`) or, by default, from mempool.space (`CHAIN_API`). It needs no account and no key. Two indexers at the same block hold the same state, and one command checks that.
+The indexer reads Bitcoin blocks, applies the Shielded Ordinals rules, and holds the full public state of every shielded collection it finds: every note, every listing, every sale. It reads blocks from a Bitcoin node (`BITCOIN_RPC`). It needs no account and no key. Two indexers at the same block hold the same state, and one command checks that.
 
 ## What you need
 
 | | |
 |---|---|
 | Node.js | 20 or newer |
-| Bitcoin Core | Optional: without it, blocks come from mempool.space. 25.0 or newer, synced. `txindex` is not needed. A pruned node works as long as it still holds every block from the collection's start block |
+| Bitcoin Core | 25.0 or newer, synced. `txindex` is not needed. A pruned node works as long as it still holds every block from the collection's start block |
 | Disk | about 1.1 MB per block followed (1.7 GB for Shielded Nakas at block 970881), plus about 10 KB per block for the registry and about 3 MB per checkpoint (4 kept per collection) |
 
 ### A pruned node
@@ -37,13 +37,7 @@ npm install
 
 ## Start it
 
-With no node, blocks come from mempool.space:
-
-```
-COLLECTION=shielded-nakas node indexer/indexer.mjs
-```
-
-From your own node:
+Give it your node's RPC address:
 
 ```
 BITCOIN_RPC=http://indexer:<password>@127.0.0.1:8332 COLLECTION=shielded-nakas node indexer/indexer.mjs
@@ -63,9 +57,9 @@ $env:COLLECTION = "shielded-nakas"
 node indexer/indexer.mjs
 ```
 
-The first start replays every block since the collection began and checks every proof. It prints its progress. Blocks it has read are kept in `.cache-indexer`, and so is a saved copy of the state (a checkpoint, see [Restarts](#restarts)), so a restart loads that, replays only the blocks after it, and asks the chain source only for new blocks.
+The first start replays every block since the collection began and checks every proof. It prints its progress. Blocks it has read are kept in `.cache-indexer`, and so is a saved copy of the state (a checkpoint, see [Restarts](#restarts)), so a restart loads that, replays only the blocks after it, and asks the node only for new blocks.
 
-How long the first start takes depends on the chain source. The replay itself is quick: from a local block cache, every block from 969342 to 970881 replayed in 126 to 203 s on a desktop PC (2026-10-11, depending on what else it was doing). Reading the blocks is the slow part: mempool.space sends a raw block at about 55 KB/s per connection (2026-10-11), so about 28 s a block, one block at a time. A node on the same machine is much faster.
+The replay itself is quick: from a local block cache, every block from 969342 to 970881 replayed in 126 to 203 s on a desktop PC (2026-10-11, depending on what else it was doing). Reading the blocks from the node comes on top of that.
 
 When it says `synced`, it is serving on port 5021:
 
@@ -119,7 +113,7 @@ Deleting `CACHE_DIR/checkpoints` is always safe: the next start replays from the
 |---|---|---|
 | `BITCOIN_RPC` | Your node's RPC address, with or without `user:password@` | none |
 | `BITCOIN_RPC_COOKIE` | Path to the node's `.cookie` file, when the address has no password | none |
-| `CHAIN_API` | An esplora or mempool HTTP API to read blocks from when `BITCOIN_RPC` is not set (`MEMPOOL_API` is read too) | `https://mempool.space/api` (signet: `https://mempool.space/signet/api`) |
+| `CHAIN_API` | An esplora-style HTTP API to read blocks from instead of a node, for testing | a public esplora API |
 | `COLLECTION` | A collection this software knows by name (`src/v1/collections.mjs`) | none |
 | `RULES_INSCRIPTION_ID` | Any other collection: its parent inscription id | none |
 | `START_HEIGHT` | Any other collection: the block to start from, at or before the parent's block | none |
@@ -167,7 +161,7 @@ Answers are sent br or gzip when the client asks, with `content-length` and an E
 - A block is applied only if it directly follows the last one. After a chain reorganisation the state is rebuilt from the newest checkpoint still in the best chain (or from the start block), next to the state being served.
 - A checkpoint is used only after the checks in [Restarts](#restarts).
 
-What it takes on trust. From your node: which chain is the best chain. That is your node's job, and the reason to run your own. With `CHAIN_API` instead (the default, mempool.space), it also trusts that API to name the best chain: the blocks it gets must carry their proof of work and link to each other, but an API could still hold back newer blocks or point at a weaker branch. It also takes from that API the scripts of the coins a mint spends (the mint-gate rule) and, for the piece index only, the values of the coins that a tx moving the parent spends. Run your own node to remove that trust.
+What it takes on trust. From the node: which chain is the best chain. That is the node's job. With `CHAIN_API` instead of a node, it trusts that API to name the best chain: the blocks it gets must carry their proof of work and link to each other, but an API could still hold back newer blocks or point at a weaker branch. It also takes from that API the scripts of the coins a mint spends (the mint-gate rule) and, for the piece index only, the values of the coins that a tx moving the parent spends.
 
 ## Trouble
 

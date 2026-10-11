@@ -16,7 +16,7 @@ Last checked 2026-10-11 (UTC), at block 970880. Everything here was tested or re
 
 ## Proven
 
-- **Independent indexers agree.** On 2026-10-11 the indexer in this repository, at release-2, replayed Shielded Nakas from block 969342 on its own (blocks from mempool.space) and reached the same state digest as the Ord Dropz server at block 970879 (7,090 notes, `39187930…7f46`). Earlier releases agreed at blocks 970089 and 970094 (2026-10-05). That includes mint day, every proof, every sale and every cancel.
+- **Independent indexers agree.** On 2026-10-11 the indexer in this repository, at release-2, replayed Shielded Nakas from block 969342 on its own and reached the same state digest as the Ord Dropz server at block 970879 (7,090 notes, `39187930…7f46`). Earlier releases agreed at blocks 970089 and 970094 (2026-10-05). That includes mint day, every proof, every sale and every cancel.
 - **Replays are repeatable.** A replay from a local block cache reproduces the published digest at block 970084 (`25099c61…2f69`, 5,033 notes) and at 970121 (`0a827955…c971`).
 - **The rules are deterministic.** No clocks, no randomness and no server data take part in accepting or rejecting a transaction. The node-source test (`npm run test:node`) replays a signet collection through two different block sources to the identical state.
 - **Reading from a plain Bitcoin node** reaches the same state as reading from an HTTP API (`npm run test:node`, signet, 8 checks). This used a stand-in node that answers the same four RPC calls with real block data. A run against a real `bitcoind` has not been recorded yet.
@@ -37,7 +37,7 @@ What `digest` covers: the tree root, the note count, the spent tags, the minted 
 - **`/collection` shows the rules exactly as inscribed**, the payout scripts included.
 - **Names:** the whole list (`/names?after=`), checkable against the running digest; `/names/info` needs no key; bad names and addresses get `400`; `/names/<name>` adds `to`.
 - **Child inscriptions from the chain.** The piece index maps each Shielded Nakas piece to its child inscription by reading the transactions that spend the parent, with no ordinals.com and no operator files. `/listings` now gives `inscriptionId` for every Shielded Nakas listing whose piece has a child, and `/pieces` serves the map, traits and the art check.
-- **Docs** now say what `digest` covers, that mempool.space is the default chain source, and what is taken on trust from it.
+- **Docs** now say what `digest` covers and what an indexer takes on trust from where it reads blocks.
 
 ## What the protocol relies on
 
@@ -49,7 +49,7 @@ Stated plainly, because anyone running an indexer should know them.
 4. **A site vault is only as private as the wallet signature that made it.** On the Ord Dropz site a vault key is derived from one wallet signature of a fixed message; any site that obtains the same signature can open that vault. The standalone wallet creates its key on the device instead.
 5. **Some mining pools skip these transactions** (OP_RETURN above the old 83-byte limit). They confirm in the next block from a pool that accepts them. Raising the fee does nothing.
 6. **The relayer is a convenience, not a trust point.** It can only publish an action as signed, delay it or drop it. Anyone can run one (`relayer/relayer.mjs`) or self-publish.
-7. **An indexer that reads from an HTTP chain API** (the default, mempool.space) trusts it to name the best chain (the blocks must still carry their proof of work and link up) and for the coins a mint spends. One reading from its own node trusts only the node.
+7. **An indexer that reads from an HTTP chain API instead of a node** trusts it to name the best chain (the blocks must still carry their proof of work and link up) and for the coins a mint spends. One reading from its own node trusts only the node.
 
 ## Not yet built
 
