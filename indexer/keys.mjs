@@ -157,6 +157,9 @@ export const presentedKey = (req) => {
  *   check(req, cost, { open }) -> { ok: true, who, headers } | { ok: false, status, error, headers }
  * `cost`: units this request counts for. `open`: the route may be called without a key even when
  * keys are required (it still shares the keyless limit).
+ * A call that costs more than the caller's whole allowance (the key's minute or day, or the keyless
+ * minute) could never pass, so it gets 403 with { cost, limit } at once, not a 429 that says to wait.
+ * Nothing is counted for it.
  */
 export function makeGate({ keysFile, required = false, publicLimit = 30, defaultLimit = DEFAULT_LIMIT, defaultDaily = DEFAULT_DAILY, trustProxy = 0 }) {
   const store = new KeyStore(keysFile);
@@ -167,6 +170,7 @@ export function makeGate({ keysFile, required = false, publicLimit = 30, default
     ...(daily ? { 'x-ratelimit-daily-limit': String(daily.limit), 'x-ratelimit-daily-remaining': String(daily.remaining) } : {}),
     ...(t.ok ? {} : { 'retry-after': String(t.retryAfter) }),
   });
+  const tooBig = (cost, limit, error, headers) => ({ ok: false, status: 403, error, cost, limit, headers });
   return {
     store, usage, required,
     check(req, cost = 1, { open = false } = {}) {
@@ -176,6 +180,9 @@ export function makeGate({ keysFile, required = false, publicLimit = 30, default
         if (!rec) return { ok: false, status: 401, error: 'This API key is not valid.', headers: {} };
         const limit = rec.limit ?? defaultLimit;
         const dailyLimit = rec.daily ?? defaultDaily;
+        const limits = { 'x-ratelimit-limit': String(limit), 'x-ratelimit-daily-limit': String(dailyLimit) };
+        if (cost > limit) return tooBig(cost, limit, `This answer costs ${cost} units; this key allows ${limit} a minute. Ask for a higher limit.`, limits);
+        if (cost > dailyLimit) return tooBig(cost, dailyLimit, `This answer costs ${cost} units; this key allows ${dailyLimit} a day. Ask for a higher limit.`, limits);
         const used = usage.today(rec.id);
         if (used + cost > dailyLimit) {
           const t = { ok: false, limit, remaining: 0, retryAfter: secondsToMidnightUtc() };
@@ -187,6 +194,7 @@ export function makeGate({ keysFile, required = false, publicLimit = 30, default
         return { ok: true, who: rec.id, headers: headersOf(t, { limit: dailyLimit, remaining: dailyLimit - used - cost }) };
       }
       if (required && !open) return { ok: false, status: 401, error: 'An API key is needed. Send it in the x-api-key header.', headers: {} };
+      if (cost > publicLimit) return tooBig(cost, publicLimit, `This answer costs ${cost} units; a caller without an API key gets ${publicLimit} a minute. Use an API key.`, { 'x-ratelimit-limit': String(publicLimit) });
       const t = limiter.take('a:' + callerAddress(req, trustProxy), publicLimit, Date.now(), cost);
       if (!t.ok) return { ok: false, status: 429, error: `Too many requests without an API key. Try again in ${t.retryAfter} s, or use a key.`, headers: headersOf(t) };
       return { ok: true, who: null, headers: headersOf(t) };
