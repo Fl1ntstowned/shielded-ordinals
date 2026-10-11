@@ -7,7 +7,7 @@ What is live, proven and still open is in `docs/STATUS.md`.
 The collection's **parent inscription** holds the rules JSON, parsed by `rules.mjs` `parseRules`. The fields are:
 - `supply`, and the art, in one of two modes:
   - **pre-inscribed:** `children`, the list of child inscription ids. A piece's `assetId` is its index.
-  - **file mint:** `artRoot` + `contentType`. `artRoot` is a Merkle root over every piece's file (`art.mjs`: leaf = sha256(0x00 ‖ u32le assetId ‖ sha256(file)), node = sha256(0x01 ‖ L ‖ R), an odd last node is carried up). Nothing is inscribed up front: after a piece is minted the platform inscribes it as a true child of the parent (tag 3) in batches, and anyone can check a child is piece N by its content hash + Merkle path (see "Children of a file-mint collection" below). `inscribeFee` (sats per piece) pays for that inscription.
+  - **file mint:** `artRoot` + `contentType`. `artRoot` is a Merkle root over every piece's file (`art.mjs`: leaf = sha256(0x00 ‖ u32le assetId ‖ sha256(file)), node = sha256(0x01 ‖ L ‖ R), an odd last node is carried up). Nothing is inscribed up front: after a piece is minted the platform inscribes it as a true child of the parent (tag 3) in batches. Anyone holding the art manifest (one content hash per piece) can check that a child is piece N by its content hash and Merkle path; the manifest is not published yet, but once every piece has a child, `artRoot` can be recomputed from the children themselves (see "Children of a file-mint collection" below). `inscribeFee` (sats per piece) pays for that inscription.
 - `mintPrice` and `artistPayoutScript`.
 - `mintFee`, `saleFeeBps` + `saleFeeMin` (paid to the platform), and `platformPayoutScript`.
 - `ticketPrice`.
@@ -44,17 +44,19 @@ Which child inscription is which piece. Nothing in the acceptance rules depends 
 - A listing's return key (BIP340) is derived from `seed + listing nf`, so a wallet restored from its seed can always reclaim.
 - Notes the owner builds for themselves (mint, buy, claim) are **proof-less**. The owner publishes `inner` plus a ciphertext to their own view key, and the indexer computes `cm` from the public assetId and ticket count.
 
-## Envelopes (one OP_RETURN each; several per tx are allowed)
+## Envelopes (one OP_RETURN each, a single push; several per tx are allowed)
+Every envelope starts `"SHORD" | version 01 | type (1 byte) | cid (8 bytes)`. Types: 01 TRANSFER, 02 MINT, 03 LIST, 04 BUY, 05 CLAIM, 06 MINTN. Integers are little-endian; field elements are 32 bytes big-endian. An envelope with another version byte is not v1 and is ignored; a malformed v1 envelope is rejected. Body layouts are in `src/v1/envelope.mjs`.
+
 | type | bytes | proof or auth | who pays the miner |
 |---|---|---|---|
 | MINT | 173 | none; the tx must spend a `P2TR(gateKey)` coin | buyer |
 | MINTN | 16 + 158 per piece (1–20) | none; one `P2TR(gateKey)` coin for the whole batch | buyer |
 | TRANSFER | 462 | Groth16 (`spend`, mode 0) | relayer (1 ticket) or the sender |
-| LIST | 393 + seller script | Groth16 (`spend`, mode 1) | relayer (1 ticket) or the seller |
+| LIST | 359 + seller script (381 with a P2WPKH seller script, 393 with P2TR) | Groth16 (`spend`, mode 1) | relayer (1 ticket) or the seller |
 | BUY | 201 | none; the tx must spend the listing lock | buyer |
 | CLAIM | 264 | BIP340 signature by the listing's return key | relayer (1 ticket) or the seller |
 
-A **paid** envelope is a MINT, a MINTN, a BUY, or a TRANSFER/LIST with `buy > 0`. A tx may carry at most one. Its payments are checked against the tx outputs, summed per scriptPubKey:
+A **paid** envelope is a MINT, a MINTN, a BUY, or a TRANSFER/LIST with `buy > 0`. A tx may carry at most one: if it carries more, every paid envelope in it is rejected (its unpaid envelopes still count). Its payments are checked against the tx outputs, summed per scriptPubKey:
 - MINT: `mintPrice` → artist, `mintFee` → platform, and `inscribeFee + k·ticketPrice` → relayer payout.
 - MINTN (batch of n): `n·mintPrice` → artist, `n·mintFee` → platform, and `n·inscribeFee + (all tickets)·ticketPrice` → relayer payout. A batch that names a piece twice or beyond supply is rejected whole. A piece that is already minted is skipped and the rest are minted (the buyer still gets every other piece they paid for); a batch of only minted pieces is rejected.
 - BUY: `price` → seller script, `saleFee(price)` → platform, and `k·ticketPrice` → relayer payout. There are no royalties.
@@ -66,7 +68,7 @@ A LIST tx must create the output `P2TR(internal = lockKey, leaf = "<1008> CSV DR
 
 - **BUY is valid only if its tx spends that exact outpoint.** Bitcoin consensus therefore makes each listing sell at most once.
 - The platform co-signs the lock only for a tx that pays correctly.
-- Spending the lock without a valid BUY **closes** the listing, which is how a cancel works. The seller then publishes CLAIM to get the piece back as a note.
+- Spending the lock without a valid BUY **closes** the listing. A cancel spends the lock and carries the seller's CLAIM in the same tx, so the listing goes straight to CLAIMED. A lock spent with neither leaves it CLOSED until the seller publishes CLAIM.
 - The leaf is the seller's escape hatch: after 1008 blocks the seller can spend the lock alone, and CLAIM in the same tx.
 - **BUY has no anchor and no proof, so it can't expire in the mempool.** The platform's "kill switch" for a listing is simply spending the lock.
 
@@ -90,11 +92,15 @@ A LIST tx must create the output `P2TR(internal = lockKey, leaf = "<1008> CSV DR
 - Remaining edge: a seller who sold within the last 6 blocks could still prove with the old note (the buyer has a new `s`, so both could claim once). Acceptable for roles/whitelists.
 
 ## Indexer order within a tx
+0. Envelopes for other collections are skipped; malformed ones are rejected.
 1. Collect the ACTIVE listings whose lock this tx spends.
 2. Apply the envelopes in output order.
 3. Any spent lock whose listing is still ACTIVE is set to CLOSED.
 
-Roots are recorded per block. TRANSFER and LIST anchors must fall within `[H−100, H−1]`.
+Roots are recorded for every block, with or without envelopes. TRANSFER and LIST anchors must fall within `[H−100, H−1]` and at or after the indexer's start block.
+
+## State digests
+`digest` (v1) is a published recipe (`docs/API.md`, "Checking `digest` yourself"): SHA-256 of a summary of the state (the tree root, the note count, the spent tags, the minted pieces and each listing's state, piece, credits and price). The piece index's digest and the names digest are published recipes too. They describe the state and never decide it; changing a recipe means a new version, never an edit.
 
 ## Self-publish, relay batches, private payouts
 - **Self-publish:** any TRANSFER / LIST / CLAIM with `spend = 0` can be put in a tx the user pays for (any wallet that can add an OP_RETURN). `buy = k` in the same envelope buys k relay credits: the tx must pay `k·ticketPrice` to the relayer payout. Trade-off: the paying wallet is visible on that tx.
@@ -114,7 +120,7 @@ Roots are recorded per block. TRANSFER and LIST anchors must fall within `[H−1
 ## Running without Ord Dropz
 | Job | Who can do it | How |
 |---|---|---|
-| Know who owns what (state) | anyone | run the indexer (`indexer/indexer.mjs`, see `docs/RUN-AN-INDEXER.md`) against your own Bitcoin node; two indexers reach the same digest |
+| Know who owns what (state) | anyone | run the indexer (`indexer/indexer.mjs`, see `docs/RUN-AN-INDEXER.md`) against your own Bitcoin node or any esplora API; two indexers reach the same digest |
 | See and use your vault | the holder | the vault key never leaves the holder's device; the wallet scans every note locally |
 | Private send / list / claim | the holder | relay through ANY relayer (`relayer/relayer.mjs`), or self-publish from your wallet (spend 0) |
 | Withdraw sale proceeds | the seller | the payout key is the seller's own; sign + broadcast anywhere |
