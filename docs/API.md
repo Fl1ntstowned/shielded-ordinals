@@ -107,6 +107,7 @@ curl https://shielded-public-api-production.up.railway.app/status
 | `blockHash` | That block's hash |
 | `notes` | How many notes exist (every mint, buy, send and cancel adds one) |
 | `digest` | SHA-256 of the whole state. Two indexers at the same `lastHeight` with the same `digest` hold the same state |
+| `checkpoint` | `{ "height": … }`: the newest block this indexer has saved its state at (a restart starts from there), or `null`. Not part of the state: two indexers in agreement can show different values |
 
 ### `GET /collection`
 
@@ -177,6 +178,8 @@ Every shielded collection this indexer follows. The indexer finds them on Bitcoi
 ```
 
 A collection that pinned a different proof verification key than this software carries is listed with `"skipped"` and the reason; its routes answer `409`.
+
+A collection found on Bitcoin that has not had a valid mint yet is listed with `"followed": false` and `"lastHeight": null`. The indexer starts following it at its first valid mint, replaying from its parent's block, so its state is the same as if it had been followed from the start. Until then `/c/<cid>/…` answers `404`.
 
 ### `GET /c/<cid>/…`
 
