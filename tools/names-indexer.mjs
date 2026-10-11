@@ -7,12 +7,18 @@
 //   node tools/names-indexer.mjs --network signet
 //   node tools/names-indexer.mjs --api http://localhost:3000/api   your node
 //   node tools/names-indexer.mjs --lookup obi.naka        the address a name points at
-//   node tools/names-indexer.mjs --list                   every name, in order
-//   node tools/names-indexer.mjs --compare https://<host>/api/shielded/names/info
+//   node tools/names-indexer.mjs --list                   every name, in order (the order of GET /names)
+//   node tools/names-indexer.mjs --compare https://<host>/names/info
 //                                                         does another indexer hold the same names?
 //   node tools/names-indexer.mjs --watch                  keep following (checks every 60 s)
 //
-// Two indexers at the same height with the same digest hold exactly the same names.
+// --compare reads the `index` field of any /names/info answer: the indexer API (indexer/indexer.mjs,
+// whose /names/info needs no key, so the hosted API https://shielded-public-api-production.up.railway.app
+// can be checked without one) or the mint server (https://<host>/api/shielded/names/info).
+//
+// Two indexers at the same height with the same digest hold exactly the same names. An indexer API
+// also serves the whole list, GET /names?after=<i>, with the running digest before each page, so the
+// list itself can be checked against that digest (docs/API.md, "GET /names").
 import fs from 'node:fs';
 import path from 'node:path';
 import * as bitcoin from 'bitcoinjs-lib';
