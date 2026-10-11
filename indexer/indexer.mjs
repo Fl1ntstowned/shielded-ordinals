@@ -18,6 +18,7 @@
 //   node indexer/indexer.mjs --once                     sync to the tip, print the status, exit
 //   node indexer/indexer.mjs --compare https://<host>/api/shielded/status
 //                                                       sync, then say whether that indexer agrees
+//   [STOP_HEIGHT=<block>]                               sync no further than that block (replays, tests)
 //
 // GET /status      { network, collection, lastHeight, blockHash, notes, digest }   digest = sha256 of the state
 // GET /state       the public state a vault scans (?since=<note count> for only the newer notes)
@@ -87,10 +88,14 @@ const rules = await loadRules({ source, rulesInscriptionId: RULES_ID, rulesFile:
 // found later replays from its parent's block without asking again, and in one round every follower
 // stands on the same chain.
 const NEAR = 7;
+// STOP_HEIGHT=<block>: sync no further than that block, as if it were the tip (a replay that must stay
+// inside a block cache, a test). Unset: the chain's tip.
+const STOP = process.env.STOP_HEIGHT?.trim() ? Number(process.env.STOP_HEIGHT.trim()) : null;
+if (STOP !== null && !(Number.isSafeInteger(STOP) && STOP >= 0)) throw new Error('STOP_HEIGHT must be a block height');
 const view = { tip: null, tipP: null, near: new Map(), deep: new Map() };
 const shared = {
   ...source,
-  tipHeight: () => (view.tipP ??= source.tipHeight().then((t) => (view.tip = t)).catch((e) => { view.tipP = null; throw e; })),
+  tipHeight: () => (view.tipP ??= source.tipHeight().then((t) => (view.tip = STOP === null ? t : Math.min(t, STOP))).catch((e) => { view.tipP = null; throw e; })),
   hashAt(h) {
     // the promise is kept, so two followers asking for the same block at once make one request
     const memo = view.tip !== null && h <= view.tip - NEAR ? view.deep : view.near;
@@ -206,7 +211,7 @@ const primaryStatus = () => {
   return statusOf(primary, ix);
 };
 
-console.error(`shielded indexer for "${rules.name}" (${NETWORK}), blocks from ${source.label}, from block ${START}`);
+console.error(`shielded indexer for "${rules.name}" (${NETWORK}), blocks from ${source.label}, from block ${START}${STOP === null ? '' : `, stopping at block ${STOP} (STOP_HEIGHT)`}`);
 if (flag('once') || opt('compare')) {
   await syncAll();
   const ix = chain.ix();
