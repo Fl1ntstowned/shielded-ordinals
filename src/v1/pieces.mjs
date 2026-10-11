@@ -428,7 +428,8 @@ export class PieceIndex {
     };
   }
 
-  /** GET /pieces/<assetId>. `global` = the registry's global number of the piece, or null. */
+  /** GET /pieces/<assetId>. `global` = the registry's global number of the piece, or null (then the
+   *  answer is never final: it changes once the registry knows the number). */
   piece(assetId, { ix, height, global = null }) {
     const mi = ix.minted.get(assetId) ?? null;
     const c = this.pieces.get(assetId) ?? null;
@@ -441,18 +442,19 @@ export class PieceIndex {
         ...(c.metadataError ? { metadataError: c.metadataError } : {}),
       } : null,
       metadata: c?.metadata ?? null,
-      final: !!(mi && c && deep(mi.height) && deep(c.height)),
+      final: !!(mi && c && global !== null && deep(mi.height) && deep(c.height)),
     };
   }
 
   /**
    * GET /pieces?page=k: { body, version, final }. Rows are built once per change (a mint, a child or
    * the collection's global range), and `version` is a hash of the answer, so an unchanged page keeps
-   * its ETag across blocks. `globalStart` = the registry's range start for this collection, or null.
+   * its ETag across blocks. `globalStart` = the registry's range start for this collection, or null
+   * (then the page is never final: its body changes once the registry knows the range).
    */
   page(k, { ix, height, globalStart = null }) {
     const m = this._pageRows(k, ix, globalStart);
-    const final = m.complete && height - m.maxHeight + 1 >= FINAL_DEPTH;
+    const final = m.complete && m.globalStart !== null && height - m.maxHeight + 1 >= FINAL_DEPTH;
     if (!m.versions[final]) {
       const body = this._pageBody(m, final);
       m.versions[final] = { body, version: sha256hex(JSON.stringify(body)).slice(0, 16) };

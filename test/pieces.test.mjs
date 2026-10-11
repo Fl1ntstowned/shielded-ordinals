@@ -293,9 +293,11 @@ async function artCase({ supply = 4, bodies, pinned, kids }) {
   check('page: with another global start the names no longer follow the rule and are sent; no global start -> no rule', shifted.body.name === null && shifted.body.rows[1][6] === 'Pieces Test #1' && small.page(0, { ix, height: tip }).body.name === null);
   const v = [tip, tip + 1, tip + 40].map((h) => small.page(0, { ix, height: h }).version);
   check('page: the version is a hash of the answer: the same from block to block while its pieces do not change', v[0] === v[1] && v[1] === v[2] && v[0] === sha(JSON.stringify(small.page(0, { ix, height: tip }).body)).slice(0, 16));
-  const notYet = small.page(1, { ix, height: S1 + 8 });
-  const nowFinal = small.page(1, { ix, height: S1 + 9 });
-  check('page: final once every piece of the page is minted and inscribed 6 blocks deep (then its version changes once)', !notYet.final && nowFinal.final && nowFinal.body.final === true && notYet.version !== nowFinal.version && !small.page(0, { ix, height: S1 + 99 }).final);
+  const notYet = small.page(1, { ix, height: S1 + 8, globalStart: 0 });
+  const nowFinal = small.page(1, { ix, height: S1 + 9, globalStart: 0 });
+  check('page: final once every piece of the page is minted and inscribed 6 blocks deep (then its version changes once)', !notYet.final && nowFinal.final && nowFinal.body.final === true && notYet.version !== nowFinal.version && !small.page(0, { ix, height: S1 + 99, globalStart: 0 }).final);
+  check('final: never without the registry\'s numbers (the answer would change when they arrive): a page without globalStart, a piece without global',
+    small.page(1, { ix, height: S1 + 99 }).final === false && small.page(1, { ix, height: S1 + 99 }).body.final === false && px1.piece(4, { ix, height: S1 + 99, global: null }).final === false && px1.piece(4, { ix, height: S1 + 99, global: 4 }).final === true);
   check('page: a page with a lost-parent gap is never final; the last page is shorter', small.page(2, { ix, height: S1 + 99 }).body.from === 6 && small.page(2, { ix, height: S1 + 99 }).body.to === 7 && small.page(2, { ix, height: S1 + 99 }).body.rows.length === 2);
   const one = px1.piece(4, { ix, height: tip, global: 4 });
   check('piece: mint, child (id, height, tx, content type, size, sha256, delegate, via), metadata as inscribed, tier', one.mint?.txid === ix.minted.get(4).txid && one.child?.id === `${R3.txid}i0` && one.child.size === art('p', 4).length && one.child.sha256 === sha(art('p', 4))

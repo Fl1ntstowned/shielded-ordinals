@@ -4,7 +4,8 @@
 //   GET /pieces/info          where the parent is, counts, the art check, ignored children, digest
 // The ETag comes from the answer itself, so a page whose pieces did not change keeps its ETag from
 // block to block. An answer about pieces that are all minted and inscribed, at least 6 blocks deep,
-// is final: it is sent with cache-control "private, max-age=31536000, immutable".
+// with the collection's global numbers known (the registry), is final: it is sent with cache-control
+// "private, max-age=31536000, immutable". Without the registry (still syncing) nothing is final.
 // A bad page or piece number is a 404 before the gate, free. No art bytes are served.
 import crypto from 'node:crypto';
 import { piecesOf } from '../../src/v1/pieces.mjs';

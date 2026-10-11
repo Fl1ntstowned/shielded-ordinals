@@ -236,7 +236,7 @@ One piece:
 
 `via` is `metadata` (its `shielded.piece`) or `pinned` (a pin in `src/v1/collections.mjs` whose Merkle path to `artRoot` checks). `metadata` is the child's tag-5 metadata as inscribed (`null` when it has none, or more than 4 KB). No art bytes are served: fetch the content from any ord server and check it against `sha256`.
 
-The `/pieces` routes cost 1 unit each. Their ETag comes from the answer itself, so a page whose pieces did not change keeps its ETag from block to block, and `If-None-Match` gets a `304`. An answer whose pieces are all minted and inscribed, at least 6 blocks deep, has `"final": true` and is sent with `cache-control: private, max-age=31536000, immutable`. A collection without a piece index (pre-inscribed, or an indexer run with `PIECES=0`) answers `404`.
+The `/pieces` routes cost 1 unit each. Their ETag comes from the answer itself, so a page whose pieces did not change keeps its ETag from block to block, and `If-None-Match` gets a `304`. An answer whose pieces are all minted and inscribed, at least 6 blocks deep, with the collection's global numbers known, has `"final": true` and is sent with `cache-control: private, max-age=31536000, immutable`. A collection without a piece index (pre-inscribed, or an indexer run with `PIECES=0`) answers `404`.
 
 ### `GET /registry`
 
