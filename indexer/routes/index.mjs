@@ -40,7 +40,10 @@
 // The ETag is "<version>-<first 12 hex of sha256(cache key)>". A 304 costs 1 unit.
 // A module only reads: nothing here may change the rules engine, the registry or a hook.
 
+import pieces from './pieces.mjs';
+
 export const routes = [
+  ...pieces, // /pieces?page=, /pieces/<assetId>, /pieces/info
 ];
 
 export default routes;
