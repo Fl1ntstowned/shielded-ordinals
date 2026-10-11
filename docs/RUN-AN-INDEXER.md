@@ -102,6 +102,7 @@ BITCOIN_RPC=… COLLECTION=shielded-nakas node indexer/indexer.mjs --once
 | `NETWORK` | `mainnet` or `signet` | `mainnet` |
 | `PORT` | Port the read API listens on | `5021` |
 | `CACHE_DIR` | Where read blocks are kept | `.cache-indexer` |
+| `STOP_HEIGHT` | Sync no further than this block, as if it were the tip: for a replay that must stay inside the blocks already in `CACHE_DIR`, or a test. Leave it unset on an indexer that serves others | none |
 
 Give either `BITCOIN_RPC` or `CHAIN_API`. Give either `COLLECTION` or the `RULES_INSCRIPTION_ID` and `START_HEIGHT` pair.
 

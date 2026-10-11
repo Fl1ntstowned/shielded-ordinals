@@ -51,7 +51,7 @@ node indexer/indexer.mjs --compare https://<another indexer>/status
 ## Tests
 
 ```
-npm test                    # both of the below
+npm test                    # every offline test: API keys, the indexer on a synthetic chain, no control bytes in the source
 npm run test:keys           # API keys and limits, offline
 npm run test:node           # the Bitcoin-node reader against a stand-in node, replaying a signet collection (needs network)
 ```
