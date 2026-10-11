@@ -1,11 +1,11 @@
 // Shielded names: run your own index (src/v1/names.mjs). No account, no key, no Ord Dropz server:
-// it reads Bitcoin blocks from your own node (through its esplora / mempool API, --api <url>)
-// starting at NAMES_START, and keeps only the name inscriptions. Blocks are cached on disk, so
-// a restart costs nothing and a new block costs one download.
+// it reads Bitcoin blocks from any esplora / mempool API (mempool.space by default, or your own
+// node's, --api <url>) starting at NAMES_START, and keeps only the name inscriptions. Blocks are
+// cached on disk, so a restart costs nothing and a new block costs one download.
 //
 //   node tools/names-indexer.mjs                          sync mainnet, print { height, count, digest }
 //   node tools/names-indexer.mjs --network signet
-//   node tools/names-indexer.mjs --api http://localhost:3000/api   your node
+//   node tools/names-indexer.mjs --api http://localhost:3000/api   your node's esplora API
 //   node tools/names-indexer.mjs --lookup obi.naka        the address a name points at
 //   node tools/names-indexer.mjs --list                   every name, in order (the order of GET /names)
 //   node tools/names-indexer.mjs --compare https://<host>/names/info

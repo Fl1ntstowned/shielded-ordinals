@@ -1,12 +1,13 @@
-// Shielded Ordinals indexer anyone can run, like `ord`. It follows Bitcoin through your own node,
-// rebuilds one collection's state and the global registry from the chain alone, and serves a read
-// API. Point a site or a wallet at it, or compare fingerprints with any other indexer: two honest
-// indexers at the same block always match.
+// Shielded Ordinals indexer anyone can run, like `ord`. It follows Bitcoin through your own node or an
+// esplora / mempool API (mempool.space by default), rebuilds each collection's state and the global
+// registry from the chain alone, and serves a read API. Point a site or a wallet at it, or compare
+// fingerprints with any other indexer: two honest indexers at the same block always match.
 //
 // Chain source (one of):
 //   BITCOIN_RPC=http://user:password@127.0.0.1:8332     your Bitcoin Core node (25.0 or newer)
 //   BITCOIN_RPC=http://127.0.0.1:8332  BITCOIN_RPC_COOKIE=/path/to/.cookie
-//   CHAIN_API=http://127.0.0.1:3000/api                 an esplora / mempool API instead
+//   CHAIN_API=http://127.0.0.1:3000/api                 an esplora / mempool API
+//   (neither)                                           https://mempool.space/api (signet: …/signet/api)
 //
 // Collection (one of):
 //   COLLECTION=shielded-nakas                           a collection this software knows
@@ -16,8 +17,9 @@
 //   NETWORK=mainnet|signet (default mainnet)  [PORT=5021]  [CACHE_DIR=.cache-indexer]
 //   node indexer/indexer.mjs
 //   node indexer/indexer.mjs --once                     sync to the tip, print the status, exit
-//   node indexer/indexer.mjs --compare https://<host>/api/shielded/status
+//   node indexer/indexer.mjs --compare https://shielded-public-api-production.up.railway.app/status
 //                                                       sync, then say whether that indexer agrees
+//                                                       (Ord Dropz's site server: <site API>/api/shielded/status)
 //   [STOP_HEIGHT=<block>]                               sync no further than that block (replays, tests)
 //
 // Restarts (src/v1/checkpoint.mjs): each collection's state is saved in CACHE_DIR/checkpoints, so a
@@ -28,7 +30,8 @@
 // Block hashes are kept in CACHE_DIR/<network>-hashes.json (chainview.mjs), so a restart asks the chain
 // source about 2 questions instead of one per block.
 //
-// GET /status      { network, collection, lastHeight, blockHash, notes, digest }   digest = sha256 of the state
+// GET /status      { network, collection, lastHeight, blockHash, notes, digest, … }   digest = sha256 of a
+//                  summary of the state (v1, docs/API.md says what it covers)
 // GET /state       the public state a vault scans (?since=<note count> for only the newer notes)
 // GET /listings    active listings
 // GET /registry    every shielded collection + its global number range

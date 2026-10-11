@@ -14,11 +14,12 @@
 //
 // Manage keys on the machine that holds the file:
 //   node indexer/keys.mjs create "<who it is for>" [units per minute] [units per day]
+//   node indexer/keys.mjs limits <id> <units per minute> <units per day>
 //   node indexer/keys.mjs list
 //   node indexer/keys.mjs revoke <id>
 // A running indexer picks up the change within a few seconds; no restart.
 //
-// The same three commands against a RUNNING indexer somewhere else (its ADMIN_SECRET is set):
+// The same four commands against a RUNNING indexer somewhere else (its ADMIN_SECRET is set):
 //   node indexer/keys.mjs create "<who>" [per minute] [per day] --at https://<host> --secret-file ~/.secrets/indexer-admin.txt
 import fs from 'node:fs';
 import path from 'node:path';

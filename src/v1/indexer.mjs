@@ -336,7 +336,8 @@ export class Indexer {
     return t;
   }
 
-  // canonical digest of the whole state, for comparing two independent indexers
+  // digest v1: a summary of the state (docs/API.md says exactly what it covers), for comparing two
+  // independent indexers
   stateDigest() {
     const listings = [...this.listings.values()].map((l) => [String(l.nf), l.state, l.assetId, l.tickets, String(l.price)]);
     return JSON.stringify({
