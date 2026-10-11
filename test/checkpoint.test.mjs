@@ -401,6 +401,16 @@ await refusal('a follower with other rules text (both refused)', () => {}, { rea
   c3.source.block = realBlock;
   await logged(() => fr.sync());
   check('reorg: the next round finishes the rollback', sameEngine(fr.ix(), await replayTo(c3, X3, B)) && fr.ix().lastHeight === B);
+  // a rebuild that fails, then the old chain comes back: the served state is current again and fresh() works
+  const served = fr.ix();
+  const { replaced } = c3.source.fork(B - 1, [[], []]);
+  c3.source.block = async () => { throw new Error('down'); };
+  await logged(() => fr.sync());
+  c3.source.block = realBlock;
+  c3.best.splice(B - 1 - c3.start, Infinity, ...replaced);
+  let back = null;
+  try { await logged(async () => { back = await fr.fresh(); }); } catch (e) { back = e.message; }
+  check('reorg: a failed rebuild, then the old chain back: fresh() gives the served state again', back === served && fr.ix() === served, back === served ? null : back);
   // without checkpoints: a full replay, still next to the old state
   const { chain: c4, X: X4 } = build(600000);
   const seen4 = [];

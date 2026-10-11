@@ -499,6 +499,7 @@ export function follower({
     } else if (ix) {
       work = ix;
       hs = hashes;
+      stale = false; // the served state is on the best chain (again, when a rebuild failed and the chain came back)
     } else if (current?.clean && current.work.lastHeight !== null && (await stillOnChain(src, current.hs, current.work.lastHeight, startHeight))) {
       ({ work, hs } = current); // a first replay that an error cut short carries on where it stopped
     } else {
