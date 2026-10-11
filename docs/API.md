@@ -27,7 +27,9 @@ curl -H "x-api-key: shord_…" https://shielded-public-api-production.up.railway
 
 ### Limits
 
-Calls are counted in units. Most routes cost 1 unit. `/state` costs 20, or 5 with `?since=`. An answer that has not changed since your last call (see "not modified" below) costs 1 whatever the route.
+Calls are counted in units. Most routes cost 1 unit. The full `/state` costs 20. `/state?since=<n>` costs 5, plus 1 for every 500 notes it returns, and never more than 20: a poll for the notes of the last few blocks costs 5, while `?since=1` costs about what the whole state does (19 at 7,037 notes). An answer that has not changed since your last call (see "not modified" below) costs 1 whatever the route.
+
+Every call counted against a key or an address says what it was charged in the `x-cost` header (`0` when it was refused).
 
 | Caller | Allowance |
 |---|---|
@@ -38,6 +40,7 @@ Every answer says where you stand:
 
 | Header | Meaning |
 |---|---|
+| `x-cost` | Units this call was charged |
 | `x-ratelimit-limit` | Units allowed this minute |
 | `x-ratelimit-remaining` | Units left this minute |
 | `x-ratelimit-daily-limit` | Units allowed today |
@@ -46,25 +49,41 @@ Every answer says where you stand:
 
 The minute resets at the start of each clock minute; the day resets at midnight UTC. Need more? Ask Ord Dropz; limits are set per key.
 
+A call that costs more than your whole allowance (for example the full `/state`, 20 units, with a key allowed 10 a minute) is refused with `403` and says what it costs and what you are allowed. Waiting would not help, so it is not a `429`. Nothing is counted for it.
+
 ### Not modified: pay 1 unit for an unchanged answer
 
-Every answer carries an `etag`. Send it back as `If-None-Match` on your next call. If nothing changed (no new block), you get `304 Not Modified`, no body, and it costs 1 unit instead of the route's price.
+Every answer carries an `etag`: `"<block height>-<last 8 hex of that block's hash>-<12 hex naming the answer>"`. Send it back as `If-None-Match` on your next call. If nothing changed (no new block), you get `304 Not Modified`, no body, and it costs 1 unit instead of the route's price.
 
 ```
 curl -i -H "x-api-key: shord_…" https://shielded-public-api-production.up.railway.app/state
-# ... etag: "970094-f24cd53beddf"
-curl -i -H "x-api-key: shord_…" -H 'If-None-Match: "970094-f24cd53beddf"' https://shielded-public-api-production.up.railway.app/state
+# ... etag: "970094-3a91c0de-f24cd53beddf"
+curl -i -H "x-api-key: shord_…" -H 'If-None-Match: "970094-3a91c0de-f24cd53beddf"' https://shielded-public-api-production.up.railway.app/state
 # HTTP/1.1 304 Not Modified
 ```
 
-Answers are compressed when you send `Accept-Encoding: gzip` (curl: `--compressed`). The state is several megabytes raw; compressed it is a fraction of that.
+`If-None-Match` may also carry the tag as weak (`W/"…"`, as some proxies rewrite it), several tags separated by commas, or `*`; any match is a 304. Because the tag names the block's hash, a block replaced at the same height (a reorg) changes every tag, so you never get a 304 for an answer that is no longer on the chain. Tags from earlier versions of the indexer had no block hash (`"970094-f24cd53beddf"`); they miss once and you get the full answer.
+
+### Compression
+
+Answers over 1 KB are compressed when your client asks: brotli (`br`) when it accepts br, otherwise `gzip`. Browsers and `curl --compressed` get br; Node's `fetch` asks only for gzip and gets gzip. No `Accept-Encoding`, or only `identity`, gets plain JSON, and `;q=0` refuses an encoding. Every answer carries `content-length`, and `vary: accept-encoding`. The body is the same JSON whichever encoding you get.
+
+Measured on the hosted API's answers at block 970832:
+
+| Answer | Plain | gzip | br |
+|---|---|---|---|
+| `/state` | 5,487,452 B | 2,271,371 B | 1,941,613 B |
+| `/state?since=` (a poll returning a few notes) | 2,267,590 B | 799,624 B | 626,745 B |
+| `/listings` | 41,807 B | 11,705 B | 9,436 B |
 
 ### Errors
 
 | Status | Body | Meaning |
 |---|---|---|
+| `400` | `{"error":"since must be a whole number"}` | `/state?since=` was not digits (`abc`, `-1`, `1e3`, empty). Not counted |
 | `401` | `{"error":"This API key is not valid."}` | The key is wrong, mistyped or revoked |
 | `401` | `{"error":"An API key is needed. …"}` | This API accepts no calls without a key |
+| `403` | `{"error":"This answer costs 20 units; this key allows 10 a minute. …","cost":20,"limit":10}` | This one call costs more than your whole allowance a minute (or a day; without a key, the address's minute). It can never pass: ask for a higher limit, or make a cheaper call such as `/state?since=`. Not counted |
 | `404` | `{"error":"not found"}` | No such route |
 | `429` | `{"error":"Too many requests …"}` | Over the minute's limit. Wait `retry-after` seconds |
 | `429` | `{"error":"This key has used its allowance for today. …"}` | Over the day's limit. Resets at midnight UTC |
@@ -76,7 +95,7 @@ A wrong key is always refused. It is never treated as a call without a key.
 
 Poll `/status` (1 unit, no key needed). Read `/state` or `/listings` again only when `lastHeight` changed, because the state only changes when a block lands. Or always send `If-None-Match` and let the 304 tell you.
 
-`/state` is large (several megabytes for a traded collection). Fetch it once, remember `noteCount`, and afterwards ask for `/state?since=<noteCount>` to receive only the notes you don't have.
+`/state` is large (several megabytes for a traded collection). Fetch it once, remember `noteCount`, and afterwards ask for `/state?since=<noteCount>` to receive only the notes you don't have (5 units). Send `Accept-Encoding: br, gzip` (or `curl --compressed`): the answers shrink to about a third of their size or less.
 
 ## Routes
 
@@ -146,7 +165,7 @@ A piece's global number is `global.start + assetId`.
 
 The full public state. A wallet downloads this and searches it locally for its own notes, so the indexer never learns which notes belong to whom.
 
-`?since=<n>` returns only the notes after the first `n`.
+`?since=<n>` returns only the notes after the first `n`. `n` is a whole number (digits only); anything else gets `400`. An `n` above `noteCount` is treated as `noteCount`. It costs 5 units, plus 1 for every 500 notes returned, at most 20 (see "Limits").
 
 | Field | Meaning |
 |---|---|
@@ -247,7 +266,7 @@ API_KEYS_FILE=/data/api-keys.json node indexer/indexer.mjs
 |---|---|---|
 | `API_KEYS_FILE` | Where key hashes are kept. Setting it turns keys and limits on | off |
 | `API_KEY_REQUIRED` | `1` refuses every call without a key, except `/status`, `/collections` and `/health` | `0` |
-| `PUBLIC_LIMIT` | Requests a minute for callers without a key, per address | `30` |
+| `PUBLIC_LIMIT` | Units a minute for callers without a key, per address. A call that costs more (the full `/state` is 20) gets `403` | `30` |
 | `TRUST_PROXY` | How many proxies stand in front of the indexer. The caller's address is read that many steps back in `X-Forwarded-For`. Leave `0` when callers connect directly | `0` |
 | `ADMIN_SECRET` | A long secret that turns on key management over HTTP | off |
 
