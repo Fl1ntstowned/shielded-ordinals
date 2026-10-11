@@ -287,10 +287,19 @@ const { answer } = answers;
 
 // Route modules (indexer/routes/index.mjs, where the contract is written): tried after the built-in
 // routes and the names, in list order.
+const optional = (v, type) => v === undefined || typeof v === type;
 for (const m of routeModules) {
   if (!m?.id || !['collection', 'global'].includes(m.scope) || !['shared', 'own'].includes(m.keep)
-    || typeof m.match !== 'function' || typeof m.parse !== 'function' || typeof m.build !== 'function') throw new Error(`route module "${m?.id ?? '?'}" does not follow the contract in indexer/routes/index.mjs`);
+    || typeof m.match !== 'function' || typeof m.parse !== 'function' || typeof m.build !== 'function'
+    || !optional(m.open, 'boolean') || !optional(m.version, 'function') || !optional(m.headers, 'function')
+    || (m.limit !== undefined && !(m.keep === 'own' && Number.isSafeInteger(m.limit) && m.limit >= 1))) throw new Error(`route module "${m?.id ?? '?'}" does not follow the contract in indexer/routes/index.mjs`);
 }
+// A price that is not a whole number of units would let the call through for free and break the
+// caller's count for the rest of the minute and the day (keys.mjs): refused, never charged.
+const priced = (m, p) => {
+  if (typeof p.key !== 'string' || !p.key || !(Number.isSafeInteger(p.cost) && p.cost >= 1)) throw new Error(`route module "${m.id}" answered parse() without a key and a whole number of units`);
+  return p;
+};
 if (new Set(routeModules.map((m) => m.id)).size !== routeModules.length) throw new Error('two route modules have the same id');
 const moduleFor = (path) => {
   for (const m of routeModules) { const params = m.match(path); if (params != null && params !== false) return { m, params }; }
@@ -336,6 +345,7 @@ http.createServer(async (req, res) => {
       const q = url.searchParams;
       const p = m.parse({ params, q, ix, col: c });
       if ('status' in p) return send(p.status, p.body); // refused before the gate: free
+      priced(m, p);
       const reg = registry.registry();
       const height = scoped ? ix.lastHeight : (reg?.lastHeight ?? ix.lastHeight);
       const ctx = { col: c, ix, params, q, height, hash: (scoped ? null : registry.hashAt(height)) ?? c.chain.hashAt(height), registry: reg, names: namesOf(), hooks: c.chain.hooks };

@@ -274,14 +274,23 @@ export const routes = [
     version: (ctx) => 'w' + ctx.height,
     build: (ctx) => ({ w: ctx.params.w, height: ctx.height, hash: ctx.hash, build: ++globalThis.__wholeBuilds }),
   },
+  {
+    id: 'badcost', scope: 'collection', keep: 'shared',
+    match: (p) => (p.startsWith('/badcost/') ? { v: p.slice(9) } : null),
+    parse: ({ params }) => (params.v === 'nokey' ? { cost: 1 } : { key: '/badcost/' + params.v, cost: Number(params.v) }),
+    build: () => ({ ok: true }),
+  },
 ];
 export default routes;`;
   const data = (src) => 'data:text/javascript,' + encodeURIComponent(src);
-  const hooks = `export async function resolve(specifier, context, next) {
-  if (specifier === './routes/index.mjs' && String(context.parentURL).endsWith('/indexer/indexer.mjs')) return { url: ${JSON.stringify(data(ROUTES))}, shortCircuit: true };
+  const loaderFor = (routesSource) => {
+    const hooks = `export async function resolve(specifier, context, next) {
+  if (specifier === './routes/index.mjs' && String(context.parentURL).endsWith('/indexer/indexer.mjs')) return { url: ${JSON.stringify(data(routesSource))}, shortCircuit: true };
   return next(specifier, context);
 }`;
-  const loader = ['--import', data(`import { register } from 'node:module'; register(${JSON.stringify(data(hooks))});`)];
+    return ['--import', data(`import { register } from 'node:module'; register(${JSON.stringify(data(hooks))});`)];
+  };
+  const loader = loaderFor(ROUTES);
   const keysFile = path.join(tmp, 'keys', 'api-keys.json');
   const key = new KeyStore(keysFile).create('dispatch test', 1000, 100000).key;
   const B = await serve({ API_KEYS_FILE: keysFile, API_KEY_REQUIRED: '1', PUBLIC_LIMIT: '1000' }, loader);
@@ -317,8 +326,30 @@ export default routes;`;
   check("modules: keep 'own' keeps the `limit` most recently used answers", same(order, ['b2', 'a1', 'c3', 'a1', 'b4']), order);
   const st = await get(port, '/status');
   check('modules: the built-in routes are unchanged', st.status === 200 && st.headers.etag === oldEtag(TIP, '/status'));
+  // a price that is not a whole number of units would pass the gate for free and leave the key's
+  // count broken (NaN) for the rest of the minute and the day
+  const pb = await get(port, '/probe/5', K1);
+  const bads = [];
+  for (const v of ['abc', '0', '1.5', '-2', 'nokey']) bads.push(await get(port, `/badcost/${v}`, K1));
+  const pa = await get(port, '/probe/5', K1);
+  check('modules: parse() without a key or a whole number of units (1 or more) gives 500 and charges nothing', bads.every((r) => r.status === 500 && r.headers['x-ratelimit-remaining'] === undefined)
+    && left(pb) - left(pa) === 3 && Number.isSafeInteger(left(pa)), bads.map((r) => [r.status, r.headers['x-ratelimit-remaining']]).concat([[left(pb), left(pa)]]));
+  const good = await get(port, '/badcost/2', K1);
+  check('modules: a whole-number price is charged as it is', good.status === 200 && left(pa) - left(good) === 2);
   B.p.proc.kill();
   await B.p.done;
+  // a module that breaks the contract stops the indexer before it serves anything
+  const broken = [`export default [{ id: 'x', scope: 'global', keep: 'own', limit: -1, match: () => null, parse: () => ({ key: '/x', cost: 1 }), build: () => 1 }];`,
+    `export default [{ id: 'y', scope: 'global', keep: 'shared', limit: 4, match: () => null, parse: () => ({ key: '/y', cost: 1 }), build: () => 1 }];`,
+    `export default [{ id: 'z', scope: 'global', keep: 'shared', open: 'yes', match: () => null, parse: () => ({ key: '/z', cost: 1 }), build: () => 1 }];`];
+  const stopped = [];
+  for (const src of broken) {
+    const r = run([], { ...cleanEnv(), CACHE_DIR: path.join(tmp, 'broken'), PORT: String(await freePort()) }, loaderFor(src));
+    const code = await Promise.race([r.done, new Promise((ok) => setTimeout(() => ok('still running'), 20_000))]);
+    if (code === 'still running') { r.proc.kill(); await r.done; }
+    stopped.push([code, /does not follow the contract/.test(r.err())]);
+  }
+  check("modules: limit below 1, limit without keep 'own', or open that is not a boolean: refused at startup", stopped.every(([code, said]) => typeof code === 'number' && code !== 0 && said), stopped);
 }
 
 await esplora.close();

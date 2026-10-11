@@ -1,8 +1,8 @@
 // Route modules: answers served next to the built-in routes of indexer/indexer.mjs. One file per
 // feature in this folder, one line each in the list at the bottom.
 //
-// The server tries, in order: /health, OPTIONS, /admin/, the built-in routes, the names routes, then
-// these modules in list order (the first whose match() accepts the path), then 404.
+// The server tries, in order: OPTIONS (any path), /health, /admin/, the built-in routes, the names
+// routes, then these modules in list order (the first whose match() accepts the path), then 404.
 //
 // A module is a plain object:
 //   id         unique name, e.g. 'changes'
@@ -16,7 +16,8 @@
 //   parse({ params, q, ix, col }) -> { key, cost } | { status, body }
 //              Must be cheap and build nothing. q = URLSearchParams.
 //              { key, cost }: key names the answer (the route plus every query value that changes it;
-//              the cache key is the collection prefix + key), cost = units the gate charges for it.
+//              the cache key is the collection prefix + key), cost = units the gate charges for it,
+//              a whole number, 1 or more (anything else, or no key, is a 500 and charges nothing).
 //              { status, body }: sent as it is (a 400 for a bad query), before the gate, free.
 //   version(ctx) -> string
 //              optional. The answer is rebuilt, and its ETag changes, when this changes.
@@ -25,7 +26,7 @@
 //   keep       'shared'  kept in the server's answer cache with the built-in answers
 //              'own'     kept in a cache of its own: the `limit` most recently used answers (default
 //                        32), for routes with many keys that must never push /state out of the cache
-//   limit      optional, with keep: 'own'
+//   limit      optional, with keep: 'own' only: a whole number, 1 or more
 //   headers?(ctx) -> object      optional extra headers on the answer (200 and 304)
 //
 // ctx = { col, ix, params, q, height, hash, registry, names, hooks }

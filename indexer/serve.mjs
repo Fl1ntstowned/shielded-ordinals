@@ -20,6 +20,8 @@ export const etagOf = (key, version) => `"${version}-${crypto.createHash('sha256
  * `limit` most recently used answers (route modules with keep: 'own').
  */
 export function makeAnswers({ limit = 0 } = {}) {
+  // (a limit below 1 would never stop evicting)
+  if (limit !== 0 && !(Number.isSafeInteger(limit) && limit >= 1)) throw new Error('an answer cache limit is a whole number above 0');
   const built = new Map(); // key -> { version, json, gz, etag }
   const answer = (key, version, build) => {
     const hit = built.get(key);
