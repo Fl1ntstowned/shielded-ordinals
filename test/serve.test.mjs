@@ -59,6 +59,12 @@ const brAt = (buf, q) => zlib.brotliCompressSync(buf, { params: { [C.BROTLI_PARA
   check('price: a poll (since = the note count, or a few below) costs 5', costOf('/state', n, n) === 5 && costOf('/state', n - 3, n) === 5 && costOf('/state', n - 499, n) === 5);
   check('price: 1 more per 500 notes returned, at most 20', costOf('/state', n - 500, n) === 6 && costOf('/state', n - 1000, n) === 7 && costOf('/state', 1, 100_000) === 20);
   check('price: every other route is 1', ['/status', '/listings', '/registry', '/collection', '/collections', '/names/info'].every((p) => costOf(p, 5, n) === 1));
+  // never below 5 or NaN: the gate would count a negative price as credit and NaN as free calls
+  const odd = [costOf('/state', 1), costOf('/state', 7037), stateCost(9000, n), stateCost(1, NaN), stateCost(1, undefined), stateCost(1.5, n), stateCost(1e30, n), stateCost(NaN, n)];
+  check('price: without a note count (or a bad one) a since costs the full 20; past the end 5; never negative or NaN', same(odd, [20, 20, 5, 20, 20, 20, 20, 20]), odd);
+  const sweep = [];
+  for (let c = 0; c <= 12_000; c += 397) for (let s = 0; s <= c + 600; s += 211) sweep.push(costOf('/state', s, c));
+  check('price: every since and note count gives a whole number from 5 to 20', sweep.every((u) => Number.isInteger(u) && u >= 5 && u <= 20), sweep.filter((u) => !(Number.isInteger(u) && u >= 5 && u <= 20)).slice(0, 5));
   const ok = [[null, 0], ['0', 0], ['5', 5], ['007', 7], ['7037', 7037], ['7038', 7037], ['99999999999999999999999', 7037]];
   const bad = ['abc', '-1', '1e3', '1.5', '', ' 5', '5 ', '+5', '0x10', '５'];
   check('parseSince: absent is 0, digits are the number, clamped to the note count', ok.every(([s, want]) => parseSince(s, n) === want), ok.map(([s]) => [s, parseSince(s, n)]));

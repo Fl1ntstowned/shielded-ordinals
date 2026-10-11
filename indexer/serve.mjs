@@ -8,9 +8,16 @@ import crypto from 'node:crypto';
 // /state?since=<n> costs 5 for a poll and 1 more for every 500 notes it returns, up to the full price,
 // so ?since=1 is not the whole state at a poll's price. (One function: another formula, for example
 // one priced by bytes, is a one-line swap here.)
+// A price is always a whole number from 5 to 20: a since past the last note returns no notes (5), and
+// a missing or broken note count is the full price, never a lower, negative or NaN one (the gate would
+// count those as credit, or as free calls for the rest of the day).
 export const STATE_COST = 20;
-export const stateCost = (since, noteCount) => (since > 0 ? Math.min(STATE_COST, 5 + Math.floor((noteCount - since) / 500)) : STATE_COST);
-export const costOf = (path, since = 0, noteCount = 0) => (path === '/state' ? stateCost(since, noteCount) : 1);
+export const stateCost = (since, noteCount) => {
+  if (!(since > 0)) return STATE_COST;
+  const returned = Number.isSafeInteger(since) && Number.isSafeInteger(noteCount) ? Math.max(0, noteCount - since) : Infinity;
+  return Math.min(STATE_COST, 5 + Math.floor(returned / 500));
+};
+export const costOf = (path, since = 0, noteCount = null) => (path === '/state' ? stateCost(since, noteCount) : 1);
 // Routes anyone may read even when keys are required: tiny, and what a wallet needs to find us.
 export const OPEN = new Set(['/status', '/collections']);
 
