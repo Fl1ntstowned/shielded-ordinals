@@ -21,7 +21,9 @@
 //              { status, body }: sent as it is (a 400 for a bad query), before the gate, free.
 //   version(ctx) -> string
 //              optional. The answer is rebuilt, and its ETag changes, when this changes.
-//              Default `${height}`.
+//              Default `${height}-${last 8 hex of hash}` (serve.mjs versionAt), so a block replaced
+//              at the same height rebuilds it. A version of your own should change with the block
+//              hash too, unless the answer cannot change with the chain.
 //   build(ctx) -> body           the JSON answer
 //   keep       'shared'  kept in the server's answer cache with the built-in answers
 //              'own'     kept in a cache of its own: the `limit` most recently used answers (default
@@ -37,7 +39,9 @@
 //   registry   the Registry (src/v1/registry.mjs), or null while it syncs
 //   names      the registry's NameIndex (src/v1/names.mjs), or null
 //   hooks      the follower hooks of that collection (src/v1/follow.mjs)
-// The ETag is "<version>-<first 12 hex of sha256(cache key)>". A 304 costs 1 unit.
+// The ETag is "<version>-<first 12 hex of sha256(cache key)>". If-None-Match may list several tags,
+// strong or W/, or '*'; a match is a 304 and costs 1 unit. The answer is sent br, gzip or plain with
+// its content-length; the gate's charge is in x-cost.
 // A module only reads: nothing here may change the rules engine, the registry or a hook.
 
 export const routes = [

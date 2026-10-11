@@ -46,6 +46,22 @@ check('a 20-unit call passes and leaves 5', h1.ok && h1.headers['x-ratelimit-rem
 check('a second 20-unit call in the same minute is refused', gate.check(req({ 'x-api-key': heavy.key }, '10.0.0.7'), 20).status === 429);
 check('a 1-unit call still fits', gate.check(req({ 'x-api-key': heavy.key }, '10.0.0.7'), 1).ok);
 
+// a call that costs more than the whole allowance could never pass: 403 at once, not an endless 429
+const small = gate.store.create('small key', 10, 50);
+const f1 = gate.check(req({ 'x-api-key': small.key }, '10.0.0.10'), 20);
+check('a call over the key\'s whole minute gets 403 with cost and limit, and no retry-after', f1.status === 403 && f1.cost === 20 && f1.limit === 10
+  && f1.error === 'This answer costs 20 units; this key allows 10 a minute. Ask for a higher limit.' && f1.headers['retry-after'] === undefined && f1.headers['x-ratelimit-limit'] === '10');
+check('a 403 counts nothing: the whole minute is still there', gate.usage.today(small.id) === 0 && gate.check(req({ 'x-api-key': small.key }, '10.0.0.10'), 10).ok && gate.usage.today(small.id) === 10);
+check('once the minute is used, a call that fits gets the usual 429', gate.check(req({ 'x-api-key': small.key }, '10.0.0.10'), 1).status === 429);
+const dayOnly = gate.store.create('small day', 100, 30);
+const f2 = gate.check(req({ 'x-api-key': dayOnly.key }, '10.0.0.10'), 40);
+check('a call over the key\'s whole day gets 403 with cost and the daily limit', f2.status === 403 && f2.cost === 40 && f2.limit === 30 && f2.error === 'This answer costs 40 units; this key allows 30 a day. Ask for a higher limit.' && gate.usage.today(dayOnly.id) === 0);
+check('a call of exactly the limit passes', gate.check(req({ 'x-api-key': dayOnly.key }, '10.0.0.10'), 30).ok);
+const f3 = gate.check(req({}, '10.0.0.11'), 5);
+check('without a key, a call over the per-address minute gets 403 with cost and limit', f3.status === 403 && f3.cost === 5 && f3.limit === 3
+  && f3.error === 'This answer costs 5 units; a caller without an API key gets 3 a minute. Use an API key.');
+check('without a key, the 403 takes nothing from the address\'s minute', gate.check(req({}, '10.0.0.11'), 3).ok);
+
 // the daily cap
 const day = gate.store.create('daily cap', 1000, 30);
 for (let i = 0; i < 30; i++) gate.check(req({ 'x-api-key': day.key }, '10.0.0.8'), 1);
@@ -75,6 +91,7 @@ const strict = makeGate({ keysFile: file, required: true });
 check('with keys required, a call without one gets 401', strict.check(req()).status === 401);
 check('with keys required, a valid key passes', strict.check(req({ 'x-api-key': cliKey })).ok);
 check('with keys required, an open route still answers keyless (shared limit)', strict.check(req({}, '10.0.0.9'), 1, { open: true }).ok);
+check('with keys required, a keyless call over the limit is 401 on a keyed route and 403 on an open one', strict.check(req({}, '10.0.0.12'), 50).status === 401 && strict.check(req({}, '10.0.0.12'), 50, { open: true }).status === 403);
 
 // who is calling, behind proxies
 const fwd = { headers: { 'x-forwarded-for': '1.1.1.1, 2.2.2.2' }, socket: { remoteAddress: '3.3.3.3' } };
