@@ -291,7 +291,7 @@ API_KEYS_FILE=/data/api-keys.json node indexer/indexer.mjs
 | Variable | Meaning | Default |
 |---|---|---|
 | `API_KEYS_FILE` | Where key hashes are kept. Setting it turns keys and limits on | off |
-| `API_KEY_REQUIRED` | `1` refuses every call without a key, except `/status`, `/collections` and `/health` | `0` |
+| `API_KEY_REQUIRED` | `1` refuses every call without a key, except `/status`, `/collections`, `/names/info` and `/health` | `0` |
 | `PUBLIC_LIMIT` | Requests a minute for callers without a key, per address | `30` |
 | `TRUST_PROXY` | How many proxies stand in front of the indexer. The caller's address is read that many steps back in `X-Forwarded-For`. Leave `0` when callers connect directly | `0` |
 | `ADMIN_SECRET` | A long secret that turns on key management over HTTP | off |
