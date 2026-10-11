@@ -24,8 +24,9 @@
 // GET /state       the public state a vault scans (?since=<note count> for only the newer notes)
 // GET /listings    active listings
 // GET /registry    every shielded collection + its global number range
-// GET /collection  rules, minted count, this collection's global range
-// GET /names/info, /names/<name>, /names/of/<shielded address>      shielded names
+// GET /collection  rules (as inscribed), minted count, this collection's global range
+// GET /names/info, /names?after=<i>, /names/<name>, /names/of/<shielded address>   shielded names
+//                  (route modules: indexer/routes/names.mjs)
 // GET /collections                 every shielded collection this indexer follows (found on chain)
 // GET /c/<cid>/status|state|listings|collection   the same routes for one collection by its cid
 // More routes come from route modules: indexer/routes/index.mjs
@@ -278,27 +279,20 @@ async function admin(req, url, send) {
   return send(404, { error: 'not found' });
 }
 
+// the shielded names (src/v1/names.mjs) are served by route modules: indexer/routes/names.mjs
 const namesOf = () => registry.registry()?.names ?? null;
-const nameRoute = (p) => {
-  const names = namesOf();
-  if (!names) return { code: 503, body: { error: 'still syncing' } };
-  if (p === '/names/info') { const st = names.state(); return { code: 200, body: { ...st, index: st } }; } // index: the shape tools/names-indexer.mjs --compare reads
-  if (p.startsWith('/names/of/')) return { code: 200, body: { names: names.of(decodeURIComponent(p.slice('/names/of/'.length))) } };
-  const rec = names.resolve(decodeURIComponent(p.slice('/names/'.length)).trim().toLowerCase());
-  return rec ? { code: 200, body: { name: rec.name, address: rec.to, id: rec.id, height: rec.height } } : { code: 404, body: { error: 'nobody has that name' } };
-};
 
 // Every answer is built once per block and kept compressed (serve.mjs); costOf and OPEN price them.
 const answers = makeAnswers();
 const { answer } = answers;
 
 // Route modules (indexer/routes/index.mjs, where the contract is written): tried after the built-in
-// routes and the names, in list order.
+// routes, in list order.
 const optional = (v, type) => v === undefined || typeof v === type;
 for (const m of routeModules) {
   if (!m?.id || !['collection', 'global'].includes(m.scope) || !['shared', 'own'].includes(m.keep)
     || typeof m.match !== 'function' || typeof m.parse !== 'function' || typeof m.build !== 'function'
-    || !optional(m.open, 'boolean') || !optional(m.version, 'function') || !optional(m.headers, 'function')
+    || !optional(m.open, 'boolean') || !optional(m.version, 'function') || !optional(m.headers, 'function') || !optional(m.miss, 'function')
     || (m.limit !== undefined && !(m.keep === 'own' && Number.isSafeInteger(m.limit) && m.limit >= 1))) throw new Error(`route module "${m?.id ?? '?'}" does not follow the contract in indexer/routes/index.mjs`);
 }
 // A price that is not a whole number of units would let the call through for free and break the
@@ -333,9 +327,8 @@ http.createServer(async (req, res) => {
     if (url.pathname.startsWith('/admin/')) return gate && ADMIN ? await admin(req, url, send) : send(404, { error: 'not found' });
     const { col, path } = byPath(url.pathname);
     const route = routes[path];
-    const isName = path.startsWith('/names/') && path.length > '/names/'.length;
-    const mod = route || isName ? null : moduleFor(path);
-    if (req.method !== 'GET' || (!route && !isName && !mod)) return send(404, { error: 'not found' });
+    const mod = route ? null : moduleFor(path);
+    if (req.method !== 'GET' || (!route && !mod)) return send(404, { error: 'not found' });
     if (!col) return send(404, { error: 'no such collection here; see /collections' });
     if (mod) {
       // a route module: a collection route answers for the collection named by the prefix (the
@@ -350,7 +343,7 @@ http.createServer(async (req, res) => {
         return send(503, { error: 'still syncing' });
       }
       const q = url.searchParams;
-      const p = m.parse({ params, q, ix, col: c });
+      const p = m.parse({ params, q, ix, col: c, names: namesOf() });
       if ('status' in p) return send(p.status, p.body); // refused before the gate: free
       priced(m, p);
       const reg = registry.registry();
@@ -364,11 +357,13 @@ http.createServer(async (req, res) => {
         extra = g.headers;
         if (!g.ok) return send(g.status, { error: g.error });
       }
+      const gone = m.miss?.(ctx); // charged, never kept (a name nobody holds, an index still syncing)
+      if (gone) return send(gone.status, gone.body);
       const a = cacheOf(m).answer(key, version, () => m.build(ctx));
       return sendAnswer(req, res, a, { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base(), ...(m.headers?.(ctx) ?? {}) });
     }
-    // names, /registry and /collections are the same answer under any /c/<cid>/ prefix
-    const global = isName || GLOBAL.has(path);
+    // /registry and /collections are the same answer under any /c/<cid>/ prefix
+    const global = GLOBAL.has(path);
     if (col.skipped && !global) return send(409, { error: col.skipped });
     const ix = global ? primary.chain.ix() : col.chain.ix();
     if (!ix) {
@@ -381,7 +376,7 @@ http.createServer(async (req, res) => {
     // copy per spelling (/c/<cid>, /c/<cid>/, /c/<cid>/status are one answer).
     const since = path === '/state' ? Math.max(0, Math.floor(Number(url.searchParams.get('since')) || 0)) : 0;
     const key = (global || col === primary ? '' : `/c/${col.cid}`) + path + (since ? `?since=${since}` : '');
-    const height = isName ? (namesOf()?.height ?? ix.lastHeight) : GLOBAL.has(path) ? globalVersion(path) : ix.lastHeight;
+    const height = global ? globalVersion(path) : ix.lastHeight;
     // The ETag is known before anything is built, so the gate goes first: a refused call never costs
     // a build, and an unchanged answer is charged as a small call, not a heavy one.
     const unchanged = req.headers['if-none-match'] === etagOf(key, height);
@@ -390,9 +385,7 @@ http.createServer(async (req, res) => {
       extra = g.headers;
       if (!g.ok) return send(g.status, { error: g.error });
     }
-    const names = isName ? nameRoute(path) : null;
-    if (names && names.code !== 200) return send(names.code, names.body); // a miss is not kept: unknown names are endless
-    const a = isName ? answer(key, height, () => names.body) : answer(key, height, () => route(col, ix, new URLSearchParams(since ? { since: String(since) } : {})));
+    const a = answer(key, height, () => route(col, ix, new URLSearchParams(since ? { since: String(since) } : {})));
     sendAnswer(req, res, a, { 'content-type': 'application/json', 'cache-control': 'no-cache', etag: a.etag, vary: 'accept-encoding', ...base() });
   } catch (e) { send(500, { error: e.message }); }
 }).listen(PORT, async () => {
