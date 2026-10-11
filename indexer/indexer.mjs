@@ -92,7 +92,9 @@ const VKEY = JSON.parse(fs.readFileSync(fileURLToPath(new URL('../zk/spend_vkey.
 if (known?.spendVkeyHash && vkeyHash(VKEY) !== known.spendVkeyHash) throw new Error(`zk/spend_vkey.json is not the verification key of "${name}"`);
 
 // The rules and their text exactly as inscribed (or the RULES_FILE): its sha256 is in every checkpoint.
-const { rules, text: rulesText } = await loadRulesInfo({ source, rulesInscriptionId: RULES_ID, rulesFile: process.env.RULES_FILE, rulesBlock: RULES_BLOCK, withHeight: false });
+const { rules, text: inscribedText } = await loadRulesInfo({ source, rulesInscriptionId: RULES_ID, rulesFile: process.env.RULES_FILE, rulesBlock: RULES_BLOCK, withHeight: false });
+// /collection shows the RULES_FILE as written, else the parsed rules without scripts (as before checkpoints).
+const rulesText = process.env.RULES_FILE ? inscribedText : null;
 
 // STOP_HEIGHT=<block>: sync no further than that block, as if it were the tip (a replay that must stay
 // inside a block cache, a test). Unset: the chain's tip.
@@ -131,7 +133,7 @@ const follow = (id, r, start, text) => {
   collections.set(cid, entry);
   return entry;
 };
-const primary = follow(RULES_ID, rules, START, rulesText);
+const primary = follow(RULES_ID, rules, START, inscribedText);
 const chain = primary.chain;
 const registry = registryFollower({ network: NETWORK, source: shared, cacheDir: CACHE, startHeight: regStart });
 const FOLLOW_ALL = process.env.FOLLOW_ALL !== '0';

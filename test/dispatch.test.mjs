@@ -209,6 +209,10 @@ const port = A.port;
     ['/names/info', '/names/info'], ['/names/alice.naka', '/names/alice.naka'], [`/c/${Q.cidHex}/state`, `/c/${Q.cidHex}/state`], [`/c/${Q.cidHex}/listings`, `/c/${Q.cidHex}/listings`]];
   const tags = await Promise.all(forms.map(([u]) => get(port, u)));
   check('server: ETags follow the old formula for every route (key = prefix + route + ?since)', tags.every((r, i) => r.status === 200 && r.headers.etag === oldEtag(TIP, forms[i][1])), tags.map((r, i) => [forms[i][0], r.status, r.headers.etag]));
+  // without RULES_FILE, /collection's rules are the parsed rules minus the scripts, as before (not the inscribed text)
+  const wantRules = JSON.stringify(Object.fromEntries(Object.entries(P.rules).filter(([k]) => !/Script$|^fileMint$/.test(k))));
+  const gotRules = JSON.stringify(JSON.parse(tags[forms.findIndex(([u]) => u === '/collection')].body.toString()).rules);
+  check('server: /collection without RULES_FILE shows the parsed rules without payout scripts (unchanged answer)', gotRules === wantRules, gotRules);
   const cols = await get(port, '/collections');
   const list = cols.json();
   const all = list.map((c) => `${c.cid}:${c.lastHeight ?? '-'}`).join(',');
