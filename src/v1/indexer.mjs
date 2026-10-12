@@ -15,8 +15,9 @@
 //                    artist, count*mintFee + all tickets -> platform; already-minted pieces skipped.
 //   TRANSFER         anchor in [H-100, H-1]; nullifier unseen; Groth16 (mode 0) verifies.
 //   LIST             same, mode 1; the tx must create the listing lock P2TR(lockKey, returnKey leaf).
-//   BUY              listing ACTIVE and this tx spends its lock; pays price -> seller script,
-//                    saleFee + k*ticketPrice -> platform. The buyer's note keeps the piece's tickets + k.
+//   BUY              listing ACTIVE and this tx spends its lock; pays price -> seller script, saleFee ->
+//                    platform, k*ticketPrice -> relayer payout and, rules v2 only, royalty -> artist.
+//                    The buyer's note keeps the piece's tickets + k.
 //   CLAIM            listing CLOSED (lock spent without a sale), or ACTIVE and this tx spends the lock;
 //                    BIP340 signature by the listing's returnKey. Returns the piece as a new note.
 //   lock spent by a tx with no valid BUY -> listing CLOSED (cancelled; the seller CLAIMs it back).
@@ -25,7 +26,7 @@ import * as bitcoin from 'bitcoinjs-lib';
 import { NoteTree } from './tree.mjs';
 import { noteCommitment, schnorrVerify, toHex } from './core.mjs';
 import { parseEnvelope, MAGIC, T, TYPE_NAME } from './envelope.mjs';
-import { collectionId, saleFee, dustFor, vkeyHash, MAX_TICKETS_PER_BUY, DEPTH, ANCHOR_WINDOW, K_MIN } from './rules.mjs';
+import { collectionId, saleFee, royalty, dustFor, vkeyHash, MAX_TICKETS_PER_BUY, DEPTH, ANCHOR_WINDOW, K_MIN } from './rules.mjs';
 import { gateScript, lockScript } from './scripts.mjs';
 
 export { DEPTH, ANCHOR_WINDOW, K_MIN };
@@ -238,6 +239,8 @@ export class Indexer {
       if (ctx.sold.has(env.listingNf)) return { ok: false, reason: 'listing already sold in this tx' };
       if (env.ticketsBuy > MAX_TICKETS_PER_BUY) return { ok: false, reason: 'too many tickets' };
       const demands = [[l.sellerScript, l.price], [R.platformScript, saleFee(R, l.price)], [R.relayerScript, tix(env.ticketsBuy)]];
+      const roy = royalty(R, l.price); // rules v2: the artist's share of the resale (0n on v1 rules, so the list above is all there is)
+      if (roy > 0n) demands.push([R.artistScript, roy]);
       if (!this._pays(tx, demands)) return { ok: false, reason: 'sale payouts missing' };
       if (ctx.dry) return { ok: true, info: { assetId: l.assetId, listingNf: l.nf } };
       l.state = 'SOLD';

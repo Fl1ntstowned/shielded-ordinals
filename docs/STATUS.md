@@ -6,7 +6,7 @@ Last checked 2026-10-11 (UTC), at block 970880. Everything here was tested or re
 
 | | |
 |---|---|
-| Protocol | SHORD v1, as written in [PROTOCOL-v1.md](../PROTOCOL-v1.md) |
+| Protocol | SHORD v1, as written in [PROTOCOL-v1.md](../PROTOCOL-v1.md). Rules v2 (artist royalty, "Rules v2" in that file) is supported by this release; no v2 collection is on mainnet yet |
 | First collection | Shielded Nakas, 3,333 pieces, global numbers #0 to #3332. Parent inscription `896803ff66162b1956ccaa3a15723e9c3acd3cbfd81acadbc94812c3ad4fb3cci0`, block 969343 |
 | Minted | 3,327 of 3,333 pieces (block 970880) |
 | Activity at block 970880 | 7,091 notes. 203 active listings, 2,018 sales, 1,401 pieces taken back |

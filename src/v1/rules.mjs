@@ -1,5 +1,6 @@
-// Shielded Ordinals v1 — the collection rules. They live in the collection's PARENT inscription
-// (content type application/json) and are fixed forever once the parent is parked at NUMS.
+// Shielded Ordinals — the collection rules (v1, and v2 = v1 plus an artist royalty on every resale).
+// They live in the collection's PARENT inscription (content type application/json) and are fixed
+// forever once the parent is parked at NUMS.
 //
 // {
 //   "p": "shord", "v": 1,
@@ -17,7 +18,14 @@
 //   "platformPayoutScript": "5120…",
 //   "mintFee": 3500,                       // sats -> platform, every mint (0 = waived for this collection)
 //   "saleFeeBps": 250, "saleFeeMin": 1000, // platform fee on every sale: max(min, price*bps/1e4)
+//   "royaltyBps": 100, "royaltyMin": 1000, // v2 ONLY: artist royalty on every sale, max(min, price*bps/1e4),
+//                                          // paid to artistPayoutScript. 0..1000 bps; royaltyMin >= the
+//                                          // artist script's dust when bps > 0. v1 rules never carry one
 //   "ticketPrice": 1500,                   // sats per relay ticket
+//   "ticketsPerMint": 1,                   // optional: relay credits bundled into EVERY mint (0..10),
+//                                          // paid to relayerPayoutScript at ticketPrice each. The
+//                                          // creator picks it; the mint server builds every mint
+//                                          // with exactly this many, so the price is the same for all
 //   "gateKey": "<xonly hex>",              // platform key: every MINT must spend a P2TR(gateKey) coin
 //   "lockKey": "<xonly hex>",              // platform key inside every listing lock
 //   "cosigners": { "keys": ["<xonly>", "<xonly>", "<xonly>"], "threshold": 2 },
@@ -30,7 +38,9 @@
 //                                          // trusted-setup ceremony is pinned in the parent forever.
 // }
 //
-// No royalties: a sale pays the seller the price and the platform its fee, nothing else.
+// Royalties: v1 has none (a sale pays the seller the price and the platform its fee, nothing else).
+// v2 adds royalty(rules, price) -> artistPayoutScript on every BUY and changes nothing else. A v2 parent
+// is unreadable to a v1-only indexer (parseRules throws), so a rule is never half-applied.
 import { Buffer } from 'buffer';
 import { sha256 } from '@noble/hashes/sha2.js';
 
@@ -42,6 +52,8 @@ export const DEPTH = 20; // note tree depth (must match the circuits)
 export const ANCHOR_WINDOW = 100; // W: a proof may anchor on any of the last 100 roots
 export const K_MIN = 1;
 export const MAX_TICKETS_PER_BUY = 100;
+export const MAX_TICKETS_PER_MINT = 10; // rules.ticketsPerMint ceiling (bundled credits per mint)
+export const MAX_ROYALTY_BPS = 1000; // rules v2: royaltyBps ceiling (10%)
 // A holder proof must use one of the last few roots. The proof doesn't reveal the note's nullifier
 // (that would let the verifier spot the piece when it later moves), so freshness is what stops a
 // note spent long ago from being used.
@@ -60,7 +72,7 @@ const posInt = (n) => Number.isSafeInteger(n) && n > 0;
 export function parseRules(content) {
   const r = typeof content === 'string' ? JSON.parse(content) : content;
   const bad = (m) => { throw new Error('rules: ' + m); };
-  if (r.p !== 'shord' || r.v !== 1) bad('not shord v1');
+  if (r.p !== 'shord' || (r.v !== 1 && r.v !== 2)) bad('not shord v1 or v2');
   if (typeof r.name !== 'string' || !r.name.length || r.name.length > 64) bad('name');
   if (!posInt(r.supply) || r.supply > MAX_SUPPLY) bad('supply');
   const fileMint = r.artRoot !== undefined;
@@ -87,14 +99,21 @@ export function parseRules(content) {
     for (const k of ['gateKey', 'lockKey']) if (!isHex(r[k], 32)) bad(k);
   }
   for (const k of ['mintPrice', 'saleFeeMin', 'ticketPrice']) if (!posInt(r[k])) bad(k);
+  if (r.ticketsPerMint !== undefined && (!Number.isInteger(r.ticketsPerMint) || r.ticketsPerMint < 0 || r.ticketsPerMint > MAX_TICKETS_PER_MINT)) bad('ticketsPerMint');
   if (!Number.isSafeInteger(r.mintFee) || r.mintFee < 0) bad('mintFee');
   if (!Number.isInteger(r.saleFeeBps) || r.saleFeeBps < 0 || r.saleFeeBps > 5000) bad('saleFeeBps');
+  if (r.v === 2) {
+    // the royalty is a v2 rule: a v1 parent carrying these keys is parsed exactly as before and pays none
+    if (!Number.isInteger(r.royaltyBps) || r.royaltyBps < 0 || r.royaltyBps > MAX_ROYALTY_BPS) bad('royaltyBps');
+    if (r.royaltyBps > 0 ? !posInt(r.royaltyMin) : (r.royaltyMin !== undefined && r.royaltyMin !== 0)) bad('royaltyMin');
+  }
   const artist = Buffer.from(r.artistPayoutScript, 'hex');
   const platform = Buffer.from(r.platformPayoutScript, 'hex');
   if (r.mintPrice < dustFor(artist)) bad('mintPrice below dust');
   if ((r.mintFee > 0 && r.mintFee < dustFor(platform)) || r.saleFeeMin < dustFor(platform)) bad('platform fee below dust');
   const relayer = r.relayerPayoutScript ? Buffer.from(r.relayerPayoutScript, 'hex') : platform;
   if (inscribeFee > 0 && inscribeFee < dustFor(relayer)) bad('inscribeFee below dust');
+  if (r.v === 2 && r.royaltyBps > 0 && r.royaltyMin < dustFor(artist)) bad('royaltyMin below dust');
   return Object.freeze({ ...r, fileMint, inscribeFee, artistScript: artist, platformScript: platform, relayerScript: relayer });
 }
 
@@ -107,4 +126,12 @@ export const collectionId = (rulesInscriptionId) => Buffer.from(sha256(Buffer.fr
 export const saleFee = (rules, price) => {
   const pct = (BigInt(price) * BigInt(rules.saleFeeBps)) / 10000n;
   return pct > BigInt(rules.saleFeeMin) ? pct : BigInt(rules.saleFeeMin);
+};
+
+// Rules v2: the artist's share of every resale, max(royaltyMin, price*royaltyBps/1e4), paid to
+// artistPayoutScript. 0n on v1 rules, even when the parent carries royalty keys (v1 never read them).
+export const royalty = (rules, price) => {
+  if (rules.v !== 2 || !(rules.royaltyBps > 0)) return 0n;
+  const pct = (BigInt(price) * BigInt(rules.royaltyBps)) / 10000n;
+  return pct > BigInt(rules.royaltyMin) ? pct : BigInt(rules.royaltyMin);
 };

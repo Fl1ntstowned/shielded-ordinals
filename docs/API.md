@@ -187,7 +187,7 @@ The collection and its rules.
 | `network` | `mainnet` or `signet` |
 | `rulesInscriptionId` | The parent inscription. Its content is the rules |
 | `cid` | The collection id carried in every message: the first 8 bytes of the SHA-256 of the parent id (as text), in hex |
-| `rules` | The rules exactly as inscribed: the parent inscription's JSON, every key in it and nothing else. For Shielded Nakas: `p`, `v`, `name`, `supply`, `artRoot`, `contentType`, `mintPrice`, `mintFee`, `saleFeeBps`, `saleFeeMin`, `ticketPrice`, `inscribeFee`, `gateKey`, `lockKey`, and the payout scripts `artistPayoutScript`, `platformPayoutScript` and `relayerPayoutScript` (hex). Amounts are in sats |
+| `rules` | The rules exactly as inscribed: the parent inscription's JSON, every key in it and nothing else. For Shielded Nakas: `p`, `v`, `name`, `supply`, `artRoot`, `contentType`, `mintPrice`, `mintFee`, `saleFeeBps`, `saleFeeMin`, `ticketPrice`, `inscribeFee`, `gateKey`, `lockKey`, and the payout scripts `artistPayoutScript`, `platformPayoutScript` and `relayerPayoutScript` (hex). A rules v2 collection also carries `royaltyBps` and `royaltyMin`. Amounts are in sats |
 | `minted` | Pieces minted so far |
 | `lastHeight` | The block this answer is from |
 | `fileMint` | `true` when each piece is inscribed after it is minted (the rules carry `artRoot`), `false` when the rules list the children |
@@ -199,12 +199,14 @@ The fields in `rules`:
 
 | Field | Meaning |
 |---|---|
-| `p`, `v` | Always `shord` and `1`: a Shielded Ordinals v1 collection |
+| `p`, `v` | `shord` and `1` or `2`: a Shielded Ordinals collection. Rules v2 adds an artist royalty (`royaltyBps` and `royaltyMin`, below); v1 rules have none |
 | `name`, `supply` | The collection's name and how many pieces it can have |
 | `artRoot`, `contentType` | File mint: one hash over every piece's art file, and the art's file type |
 | `children` | Pre-inscribed collections: the child inscription of every piece |
 | `mintPrice`, `artistPayoutScript` | What a mint pays the artist, and where |
 | `mintFee`, `saleFeeBps`, `saleFeeMin`, `platformPayoutScript` | What a mint and a sale pay Ord Dropz (the sale fee is hundredths of a percent of the price, `200` is 2%, and at least `saleFeeMin`), and where |
+| `royaltyBps` | Rules v2 only: what a sale pays the artist, in hundredths of a percent of the price (`100` is 1%), from `0` to `1000`. Paid to `artistPayoutScript` in the buyer's transaction |
+| `royaltyMin` | Rules v2 only: the smallest royalty, in sats. Required (and at least the dust limit of `artistPayoutScript`) when `royaltyBps` is above `0`; absent or `0` when it is `0` |
 | `ticketPrice`, `inscribeFee`, `relayerPayoutScript` | The price of one relay credit and of each piece's inscription, and where they are paid |
 | `gateKey`, `lockKey` | Ord Dropz's signing keys (or `cosigners` in a 2-of-3 collection). You never need them |
 
@@ -225,6 +227,7 @@ Pieces for sale now.
 | `inscriptionId` | The piece's child inscription: from the rules for a pre-inscribed collection, from the piece index (`/pieces`) for a file-mint one such as Shielded Nakas. `null` while the piece has no child |
 | `price` | Price in sats, in a string |
 | `saleFee` | The platform fee a buyer pays on top, in sats, in a string: the larger of `saleFeeMin` and `price × saleFeeBps / 10000` rounded down. For Shielded Nakas that is 2%, at least 1,000 sats |
+| `royalty` | v2 collections only: the artist's royalty a buyer pays on top, in sats, in a string: the larger of `royaltyMin` and `price × royaltyBps / 10000` rounded down, paid to `artistPayoutScript`. Absent for v1 collections such as Shielded Nakas. A buyer pays `price + saleFee + royalty` |
 | `tickets` | Relay credits that travel with the piece. Each credit pays the relayer to publish one action, such as a private send |
 | `listedAt` | The block the listing confirmed in |
 
@@ -264,7 +267,7 @@ A `SOLD` listing's `price` is what the piece sold for. The block of a sale is th
 
 The API shows confirmed blocks only. An `ACTIVE` listing may already have a buy or a cancel waiting to confirm.
 
-Numbers too large for JSON are decimal strings: `cm`, `nf`, every nullifier, `root` and `price` here, and `nf`, `price` and `saleFee` in `/listings`.
+Numbers too large for JSON are decimal strings: `cm`, `nf`, every nullifier, `root` and `price` here, and `nf`, `price`, `saleFee` and `royalty` in `/listings`.
 
 ### `GET /collections`
 

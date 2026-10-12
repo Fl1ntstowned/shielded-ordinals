@@ -67,7 +67,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { follower, registryFollower, loadRulesInfo, makeSource, defaultApi, CHECKPOINT_EVERY, CHECKPOINT_KEEP } from '../src/v1/follow.mjs';
 import { exportState } from '../src/v1/view.mjs';
-import { saleFee, vkeyHash, collectionId } from '../src/v1/rules.mjs';
+import { saleFee, royalty, vkeyHash, collectionId } from '../src/v1/rules.mjs';
 import { REGISTRY_START } from '../src/v1/registry.mjs';
 import { knownCollection, COLLECTIONS, piecePins } from '../src/v1/collections.mjs';
 import { PieceIndex, piecesOf } from '../src/v1/pieces.mjs';
@@ -230,7 +230,7 @@ const routes = {
   '/state': (_c, ix, q) => exportState(ix, { sinceNote: Math.max(0, Number(q.get('since')) || 0) }),
   '/listings': (col, ix) => [...ix.listings.values()].filter((l) => l.state === 'ACTIVE').map((l) => ({
     nf: String(l.nf), assetId: l.assetId, inscriptionId: col.rules.children?.[l.assetId] ?? piecesOf(col.chain.hooks)?.childOf(l.assetId)?.id ?? null, price: String(l.price),
-    saleFee: String(saleFee(col.rules, l.price)), tickets: l.tickets, listedAt: l.height,
+    saleFee: String(saleFee(col.rules, l.price)), ...(col.rules.v === 2 ? { royalty: String(royalty(col.rules, l.price)) } : {}), tickets: l.tickets, listedAt: l.height,
   })),
   '/registry': () => registry.registry()?.list() ?? [],
   '/collections': () => collectionsList(),

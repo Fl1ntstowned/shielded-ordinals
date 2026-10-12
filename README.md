@@ -10,7 +10,7 @@ There is no token, no sidechain and no bridge. Everything is in Bitcoin blocks.
 
 | Path | What |
 |---|---|
-| `PROTOCOL-v1.md` | The protocol: notes, envelopes, the listing lock, the proof circuit, the indexer's rules |
+| `PROTOCOL-v1.md` | The protocol: notes, envelopes, the listing lock, the proof circuit, the indexer's rules (rules v1 and v2) |
 | `src/v1/` | The reference implementation of the rules: envelopes, rules, indexer, registry, names, chain reader, checkpoints, piece index |
 | `circuits/` | The proof circuits (circom) |
 | `zk/` | The verification keys the indexer checks proofs with |

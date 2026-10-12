@@ -27,7 +27,7 @@ import { schnorr } from '@noble/curves/secp256k1.js';
 import {
   encodeMint, encodeMintBatch, encodeListBody, encodeTransferBody, encodeBuy, encodeClaimBody, claimSigHash, parseEnvelope, T,
 } from '../../src/v1/envelope.mjs';
-import { parseRules, collectionId, saleFee } from '../../src/v1/rules.mjs';
+import { parseRules, collectionId, saleFee, royalty } from '../../src/v1/rules.mjs';
 import { gateScript, lockScript } from '../../src/v1/scripts.mjs';
 import { Indexer, envelopesOf } from '../../src/v1/indexer.mjs';
 import { verifiedBlock, networkOf, linkedHashes } from '../../src/v1/follow.mjs';
@@ -176,12 +176,14 @@ export class SynthChain {
     return { ...t, listing: { nf, assetId, tickets, price: BigInt(price), sellerScript: Buffer.from(seller), ret, lock: { txid: t.txid, vout: 1, script: lock } } };
   }
 
-  /** BUY: spends the listing lock and pays the seller, the platform's sale fee and any tickets. */
+  /** BUY: spends the listing lock and pays the seller, the platform's sale fee, any tickets and, on v2 rules, the artist's royalty. */
   buy(col, listing, { ticketsBuy = 0 } = {}) {
     const R = col.rules;
     const data = encodeBuy({ cid: col.cid, listingNf: listing.nf, ticketsBuy, ...noteBits(`${col.cidHex} buy ${this.n}`) });
     const outs = [opReturn(data), { script: listing.sellerScript, value: listing.price }, { script: R.platformScript, value: saleFee(R, listing.price) }];
     if (ticketsBuy > 0) outs.push({ script: R.relayerScript, value: ticketsBuy * R.ticketPrice });
+    const roy = royalty(R, listing.price);
+    if (roy > 0n) outs.push({ script: R.artistScript, value: roy });
     return this.tx({ ins: [{ txid: listing.lock.txid, vout: listing.lock.vout, script: listing.lock.script }], outs });
   }
 

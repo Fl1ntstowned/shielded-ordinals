@@ -4,7 +4,7 @@ This is the reference for the code in `src/v1/`, `circuits/spend.circom` and `ci
 What is live, proven and still open is in `docs/STATUS.md`.
 
 ## Collection = rules
-The collection's **parent inscription** holds the rules JSON, parsed by `rules.mjs` `parseRules`. The fields are:
+The collection's **parent inscription** holds the rules JSON (`p` = `shord`, `v` = 1 or 2), parsed by `rules.mjs` `parseRules`. The v1 fields are (v2 adds two, see "Rules v2" below):
 - `supply`, and the art, in one of two modes:
   - **pre-inscribed:** `children`, the list of child inscription ids. A piece's `assetId` is its index.
   - **file mint:** `artRoot` + `contentType`. `artRoot` is a Merkle root over every piece's file (`art.mjs`: leaf = sha256(0x00 ‖ u32le assetId ‖ sha256(file)), node = sha256(0x01 ‖ L ‖ R), an odd last node is carried up). Nothing is inscribed up front: after a piece is minted the platform inscribes it as a true child of the parent (tag 3) in batches. Anyone holding the art manifest (one content hash per piece) can check that a child is piece N by its content hash and Merkle path; the manifest is not published yet, but once every piece has a child, `artRoot` can be recomputed from the children themselves (see "Children of a file-mint collection" below). `inscribeFee` (sats per piece) pays for that inscription.
@@ -59,7 +59,7 @@ Every envelope starts `"SHORD" | version 01 | type (1 byte) | cid (8 bytes)`. Ty
 A **paid** envelope is a MINT, a MINTN, a BUY, or a TRANSFER/LIST with `buy > 0`. A tx may carry at most one: if it carries more, every paid envelope in it is rejected (its unpaid envelopes still count). Its payments are checked against the tx outputs, summed per scriptPubKey:
 - MINT: `mintPrice` → artist, `mintFee` → platform, and `inscribeFee + k·ticketPrice` → relayer payout.
 - MINTN (batch of n): `n·mintPrice` → artist, `n·mintFee` → platform, and `n·inscribeFee + (all tickets)·ticketPrice` → relayer payout. A batch that names a piece twice or beyond supply is rejected whole. A piece that is already minted is skipped and the rest are minted (the buyer still gets every other piece they paid for); a batch of only minted pieces is rejected.
-- BUY: `price` → seller script, `saleFee(price)` → platform, and `k·ticketPrice` → relayer payout. There are no royalties.
+- BUY: `price` → seller script, `saleFee(price)` → platform, and `k·ticketPrice` → relayer payout. Rules v1 have no royalties. Rules v2 add `royalty(price)` → artist payout script (see "Rules v2" below).
 - Ticket top-up: `buy·ticketPrice` → relayer payout.
 - Payments are summed per scriptPubKey, so artist, platform and relayer may all be the same address.
 
@@ -71,6 +71,17 @@ A LIST tx must create the output `P2TR(internal = lockKey, leaf = "<1008> CSV DR
 - Spending the lock without a valid BUY **closes** the listing. A cancel spends the lock and carries the seller's CLAIM in the same tx, so the listing goes straight to CLAIMED. A lock spent with neither leaves it CLOSED until the seller publishes CLAIM.
 - The leaf is the seller's escape hatch: after 1008 blocks the seller can spend the lock alone, and CLAIM in the same tx.
 - **BUY has no anchor and no proof, so it can't expire in the mempool.** The platform's "kill switch" for a listing is simply spending the lock.
+
+## Rules v2 (artist royalty)
+The rules JSON carries `v`: `1` or `2`. v2 is v1 plus two fields:
+- `royaltyBps`: an integer from 0 to 1000, in hundredths of a percent of the price (100 = 1%).
+- `royaltyMin`: sats. Required, and at least the dust limit of `artistPayoutScript`, when `royaltyBps` > 0. Absent or 0 when `royaltyBps` is 0.
+
+`royalty(price) = max(royaltyMin, floor(price × royaltyBps / 10000))`. A BUY in a v2 collection must pay it to `artistPayoutScript` (the script that receives `mintPrice`), on top of `price` → seller script, `saleFee(price)` → platform and `k·ticketPrice` → relayer payout. Payments are summed per scriptPubKey, so the artist may also be the seller or the platform. A BUY that does not pay the royalty is rejected, and the spent lock closes the listing, like any other failed buy.
+
+Nothing else changes: envelopes (the version byte stays `01`), proofs, the digest recipe, numbering, names and every v1 rule. v1 rules pay no royalty, even if a v1 parent carries royalty keys.
+
+An indexer that knows only v1 refuses to parse a v2 parent, so for it that collection does not exist. Every indexer must upgrade before the first v2 collection appears. Shielded Nakas is v1 and unchanged: 2% platform fee, at least 1,000 sats, no royalty.
 
 ## The spend circuit (`Spend(20)`, 14.4k constraints, ~0.8–1.0 s to prove)
 - **Public inputs:** `root, nf, hbody, cmOut, spend, buy, mode, assetIdPub, ticketsPub`.

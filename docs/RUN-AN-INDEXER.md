@@ -142,7 +142,7 @@ Every route is a `GET` and answers JSON.
 |---|---|
 | `/status` | Network, collection, last block applied and its hash, note count, state digest, newest checkpoint |
 | `/state` | The full public state: notes, spent tags, listings, recent tree roots, minted pieces. `?since=<note count>` returns only the notes after that many |
-| `/listings` | Active listings: piece, child inscription, price, sale fee, credits |
+| `/listings` | Active listings: piece, child inscription, price, sale fee, royalty (v2 collections), credits |
 | `/collection` | The collection's rules as inscribed, minted count, global number range, piece index summary |
 | `/registry` | Every shielded collection found on Bitcoin, with its global number range |
 | `/collections` | Every collection this indexer follows, with each one's last block, note count and digest; a collection found on Bitcoin that has not minted yet is listed with `"followed": false` |
